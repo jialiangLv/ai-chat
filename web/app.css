@@ -172,6 +172,109 @@ body {
   padding-top: 2px;
 }
 
+/* ---------- 助手正文里的 Markdown 元素 ---------- */
+
+/* 助手正文是渲染出来的 HTML，要用 normal 顶掉从 .msg__body 继承来的 pre-wrap，
+   否则生成标签之间的空白会被当成真实空白 */
+.msg--assistant .msg__content {
+  white-space: normal;
+}
+
+.msg__content p {
+  margin: 0 0 10px;
+}
+
+.msg__content > *:last-child {
+  margin-bottom: 0;
+}
+
+.msg__content h3,
+.msg__content h4,
+.msg__content h5 {
+  margin: 16px 0 8px;
+  line-height: 1.4;
+}
+
+.msg__content ul,
+.msg__content ol {
+  margin: 0 0 10px;
+  padding-left: 24px;
+}
+
+.msg__content li {
+  margin: 2px 0;
+}
+
+.msg__content blockquote {
+  margin: 0 0 10px;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid #ddd;
+  color: #666;
+}
+
+.msg__content hr {
+  margin: 16px 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.msg__content a {
+  color: #0b57d0;
+}
+
+.msg__content code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #f0f0f0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+/* 代码块：深底 + 右上角复制按钮 */
+.md-code {
+  position: relative;
+  margin: 0 0 10px;
+}
+
+.md-code pre {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #1e1e1e;
+  overflow-x: auto;
+}
+
+.md-code code {
+  padding: 0;
+  background: none;
+  color: #e6e6e6;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.md-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 3px 10px;
+  border: 1px solid #555;
+  border-radius: 6px;
+  background: #2d2d2d;
+  color: #ddd;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.md-copy:hover {
+  background: #3d3d3d;
+}
+
+.msg__error {
+  color: #c0392b;
+}
+
 /* 真实 token 用量脚注 */
 .msg__usage {
   margin-top: 6px;

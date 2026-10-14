@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>markdown.js 测试</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+           max-width: 900px; margin: 24px auto; padding: 0 16px; line-height: 1.6; }
+    #summary { padding: 10px 14px; border-radius: 8px; font-weight: 600; }
+    #summary.ok   { background: #e7f6ee; color: #0a7d4f; }
+    #summary.bad  { background: #fdecea; color: #c0392b; }
+    .case { padding: 10px 0; border-bottom: 1px solid #eee; }
+    .case__name { font-weight: 600; }
+    .pass { color: #0a7d4f; }
+    .fail { color: #c0392b; font-weight: 600; }
+    .case pre { margin: 4px 0; padding: 6px 8px; background: #f6f6f6;
+                border-radius: 4px; overflow: auto; font-size: 12px; white-space: pre-wrap;
+                word-break: break-all; }
+    .case .label { color: #888; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h2>markdown.js 测试</h2>
+  <p>每个用例检查渲染结果里「必须包含」和「绝不能包含」的片段。结果用 <code>textContent</code>
+     显示——所以就算转义有漏洞，页面也<b>不会</b>真的执行那些载荷，只会红着脸报 FAIL。</p>
+  <div id="summary"></div>
+  <div id="results"></div>
+
+  <script src="markdown.js"></script>
+  <script>
+    // 每个用例：input 是输入，contains / notContains 是要断言的片段
+    const CASES = [
+      {
+        // 注意下面这个用例：输入里结束标签的斜杠写成了 \/。
+        // HTML 解析器会在脚本内容中检索「左尖括号 + 斜杠 + script」这个字面序列，
+        // 一出现就提前结束脚本元素，后面的代码会全部变成页面上的文本——
+        // 连注释里出现也不行，所以这段注释只能绕着说。
+        // 而 JS 里 \/ 就是 /，字符串的值完全不变。
+        name: 'XSS：script 标签必须被转义',
+        input: '<script>alert(1)<\/script>',
+        contains: ['&lt;script&gt;'],
+        notContains: ['<script>'],
+      },
+      {
+        name: 'XSS：img onerror 必须被转义',
+        input: '<img src=x onerror=alert(1)>',
+        contains: ['&lt;img'],
+        notContains: ['<img'],
+      },
+      {
+        name: 'XSS：属性逃逸尝试（引号必须转义）',
+        input: '[x](https://e.com" onmouseover="alert(1))',
+        contains: ['&quot;'],
+        notContains: ['onmouseover="'],
+      },
+      {
+        name: 'XSS：javascript: 伪协议不该变成链接',
+        input: '[点我](javascript:alert(1))',
+        notContains: ['<a '],
+      },
+      {
+        name: '转义：& 只转一次，不能双重转义',
+        input: 'a & b',
+        contains: ['a &amp; b'],
+        notContains: ['&amp;amp;'],
+      },
+      {
+        name: '粗体',
+        input: '这是**粗体**文字',
+        contains: ['<strong>粗体</strong>'],
+      },
+      {
+        name: '斜体',
+        input: '这是*斜体*文字',
+        contains: ['<em>斜体</em>'],
+      },
+      {
+        name: '行内代码：内部的 ** 不该被当成粗体',
+        input: '看这个 `**x**` 标记',
+        contains: ['<code>**x**</code>'],
+        notContains: ['<strong>'],
+      },
+      {
+        name: '代码块：语言标识进 class',
+        input: '```python\nprint(1)\n```',
+        contains: ['<div class="md-code">', 'class="language-python"', 'print(1)'],
+      },
+      {
+        name: '代码块：内部 HTML 必须被转义',
+        input: '```\n<div>hi</div>\n```',
+        contains: ['&lt;div&gt;hi&lt;/div&gt;'],
+        notContains: ['<div>hi</div>'],
+      },
+      {
+        name: '代码块：未闭合也能渲染（流式过程中的常见状态）',
+        input: '```js\nlet x = 1;',
+        contains: ['<pre>', 'let x = 1;'],
+      },
+      {
+        name: '标题：降级到 h3（# 对应 h3）',
+        input: '# 一级标题',
+        contains: ['<h3>一级标题</h3>'],
+      },
+      {
+        name: '标题：### 封顶到 h5',
+        input: '### 三级标题',
+        contains: ['<h5>三级标题</h5>'],
+      },
+      {
+        name: '无序列表',
+        input: '- 甲\n- 乙',
+        contains: ['<ul>', '<li>甲</li>', '<li>乙</li>', '</ul>'],
+      },
+      {
+        name: '有序列表',
+        input: '1. 甲\n2. 乙',
+        contains: ['<ol>', '<li>甲</li>', '<li>乙</li>', '</ol>'],
+      },
+      {
+        name: '引用块',
+        input: '> 被引用的话',
+        contains: ['<blockquote>被引用的话</blockquote>'],
+      },
+      {
+        name: '链接：https 正常渲染',
+        input: '[点我](https://example.com)',
+        contains: ['<a href="https://example.com"', '>点我</a>'],
+      },
+      {
+        name: '水平线',
+        input: '---',
+        contains: ['<hr>'],
+      },
+      {
+        name: '中文原样通过，不被当成语法',
+        input: '你好，世界。这是普通一段话。',
+        contains: ['<p>你好，世界。这是普通一段话。</p>'],
+      },
+      {
+        name: '综合：列表 + 粗体 + 行内代码混排',
+        input: '1. 第一项 **重要**\n2. 第二项用 `code`',
+        contains: ['<ol>', '<strong>重要</strong>', '<code>code</code>'],
+      },
+    ];
+
+    let passed = 0;
+    let failed = 0;
+
+    for (const item of CASES) {
+      let html;
+      try {
+        html = renderMarkdown(item.input);
+      } catch (err) {
+        html = '[渲染抛异常] ' + err;
+      }
+
+      const problems = [];
+      for (const s of item.contains || []) {
+        if (!html.includes(s)) problems.push('缺少 ' + JSON.stringify(s));
+      }
+      for (const s of item.notContains || []) {
+        if (html.includes(s)) problems.push('不该出现 ' + JSON.stringify(s));
+      }
+
+      const ok = problems.length === 0;
+      ok ? passed++ : failed++;
+
+      const div = document.createElement('div');
+      div.className = 'case';
+
+      const title = document.createElement('div');
+      title.className = 'case__name';
+      title.textContent = (ok ? '✅ PASS  ' : '❌ FAIL  ') + item.name;
+      title.classList.add(ok ? 'pass' : 'fail');
+      div.appendChild(title);
+
+      const inLabel = document.createElement('div');
+      inLabel.className = 'label';
+      inLabel.textContent = '输入：';
+      const inPre = document.createElement('pre');
+      inPre.textContent = item.input;          // 用 textContent，绝不执行输入
+      div.appendChild(inLabel);
+      div.appendChild(inPre);
+
+      const outLabel = document.createElement('div');
+      outLabel.className = 'label';
+      outLabel.textContent = '渲染结果：';
+      const outPre = document.createElement('pre');
+      outPre.textContent = html;               // 同上：失败时也只显示，不执行
+      div.appendChild(outLabel);
+      div.appendChild(outPre);
+
+      if (!ok) {
+        const p = document.createElement('div');
+        p.className = 'fail';
+        p.textContent = '问题：' + problems.join('；');
+        div.appendChild(p);
+      }
+
+      document.getElementById('results').appendChild(div);
+    }
+
+    const summary = document.getElementById('summary');
+    summary.textContent = '共 ' + CASES.length + ' 个用例：' +
+      passed + ' 通过，' + failed + ' 失败';
+    summary.className = failed ? 'bad' : 'ok';
+  </script>
+</body>
+</html>

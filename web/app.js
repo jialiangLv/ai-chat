@@ -286,7 +286,9 @@ async function send() {
           firstContentAt = Date.now();
           reply.reasoningBox.classList.add('is-collapsed');  // 开始作答，收起思考
         }
-        reply.content.textContent = out.content;
+        // 每收到一块就用最新的完整文本重新渲染整段。流式过程中 Markdown 是不完整的
+        // （半截的 **、没闭合的代码块），但重新解析会自动"自愈"，不需要特殊处理
+        reply.content.innerHTML = renderMarkdown(out.content);
       }
 
       if (out.usage) {
@@ -322,7 +324,8 @@ async function send() {
       statusEl.textContent = '已停止生成（思考 ' + out.reasoning.length + ' 字，正文 ' +
         out.content.length + ' 字）';
     } else {
-      reply.content.textContent += '\n[出错] ' + err;
+      reply.content.innerHTML = renderMarkdown(out.content) +
+        '<p class="msg__error">[出错] ' + escapeHtml(String(err)) + '</p>';
       statusEl.textContent = '';
     }
   } finally {
@@ -338,6 +341,30 @@ sendEl.addEventListener('click', send);
 
 payloadToggleEl.addEventListener('click', () => {
   payloadEl.hidden = !payloadEl.hidden;
+});
+
+// 代码块的「复制」按钮是渲染出来的，且流式期间会被反复重建，
+// 所以用事件委托统一处理，而不是每次渲染都去绑定
+chatEl.addEventListener('click', (e) => {
+  const button = e.target.closest('.md-copy');
+  if (!button) {
+    return;
+  }
+  const code = button.parentElement.querySelector('code');
+  if (!code) {
+    return;
+  }
+  navigator.clipboard.writeText(code.textContent).then(
+    () => {
+      button.textContent = '已复制';
+      setTimeout(() => { button.textContent = '复制'; }, 1200);
+    },
+    () => {
+      // 非安全上下文（例如用局域网 IP 访问）下剪贴板 API 不可用
+      button.textContent = '复制失败';
+      setTimeout(() => { button.textContent = '复制'; }, 1200);
+    }
+  );
 });
 
 stopEl.addEventListener('click', () => {
