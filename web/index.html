@@ -3,104 +3,34 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ai-chat 最小链路</title>
-  <style>
-    body { font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-           max-width: 720px; margin: 40px auto; padding: 0 16px; }
-    textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; }
-    button { font: inherit; padding: 6px 18px; margin-top: 8px; cursor: pointer; }
-    #output { white-space: pre-wrap; border: 1px solid #ddd; border-radius: 6px;
-              padding: 12px; margin-top: 16px; min-height: 80px; line-height: 1.7; }
-    #meta { color: #888; font-size: 13px; }
-  </style>
+  <title>ai-chat</title>
+  <link rel="stylesheet" href="app.css" />
 </head>
 <body>
-  <h2>ai-chat 最小链路</h2>
-  <p id="meta">状态：未发送</p>
-  <textarea id="input" rows="3">你好，介绍一下你自己</textarea>
-  <button id="send">发送</button>
-  <div id="output"></div>
+  <!-- 顶栏：标题 + 一行流式状态（首字延迟 / 总耗时），方便直观判断是不是真流式 -->
+  <header class="topbar">
+    <span class="topbar__title">ai-chat</span>
+    <span class="topbar__status" id="status"></span>
+  </header>
 
-<script>
-const inputEl  = document.getElementById('input');
-const sendEl   = document.getElementById('send');
-const outputEl = document.getElementById('output');
-const metaEl   = document.getElementById('meta');
+  <!-- 消息区：所有对话气泡都插在这里 -->
+  <main class="chat" id="chat">
+    <div class="welcome" id="welcome">
+      <h1>有什么可以帮你的？</h1>
+      <p>当前是本地演示版：服务端返回写死的文字，用来验证流式链路。</p>
+    </div>
+  </main>
 
-sendEl.addEventListener('click', send);
+  <!-- 底部输入区：回车发送，Shift + 回车换行 -->
+  <footer class="composer">
+    <div class="composer__box">
+      <textarea id="input" rows="1" placeholder="给 ai-chat 发送消息"></textarea>
+      <button id="send" class="btn btn--send" type="button" title="发送">↑</button>
+      <button id="stop" class="btn btn--stop" type="button" title="停止生成" hidden>■</button>
+    </div>
+    <div class="composer__hint">Enter 发送，Shift + Enter 换行</div>
+  </footer>
 
-// 处理一帧 SSE 事件：取出 data: 后的 JSON，把 delta.content 追加到页面上
-function handleEvent(event) {
-  for (const line of event.split('\n')) {
-    if (!line.startsWith('data:')) continue;
-    const payload = line.slice(5).trim();
-    if (payload === '[DONE]') return;
-    try {
-      const parsed = JSON.parse(payload);
-      const delta = parsed.choices?.[0]?.delta?.content;
-      if (delta) outputEl.textContent += delta;  // 逐字追加，天然形成打字机效果
-    } catch (e) {
-      // JSON 尚未收全，忽略，等下一块
-    }
-  }
-}
-
-// 发送一次对话请求，并把流式返回的内容逐字渲染出来
-async function send() {
-  outputEl.textContent = '';
-  const startedAt = Date.now();
-  let firstChunkAt = 0;
-  metaEl.textContent = '状态：请求中…';
-  sendEl.disabled = true;
-
-  try {
-    const resp = await fetch('/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'deepseek-flash',
-        stream: true,
-        messages: [{ role: 'user', content: inputEl.value }]
-      })
-    });
-
-    if (!resp.ok) {
-      metaEl.textContent = '状态：请求失败，HTTP ' + resp.status;
-      return;
-    }
-
-    // 逐块读取原始字节；TextDecoder 的 stream 模式会把跨块被切断的半个 UTF-8 字符自动拼回
-    const reader  = resp.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      if (!firstChunkAt) {
-        firstChunkAt = Date.now();
-        metaEl.textContent = '状态：首字延迟 ' + (firstChunkAt - startedAt) + ' ms（若接近总耗时说明被缓冲）';
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-
-      // SSE 以空行分隔事件，先缓存再切，不能假设一次 read() 就是完整的一帧
-      let sep;
-      while ((sep = buffer.indexOf('\n\n')) >= 0) {
-        const event = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        handleEvent(event);
-      }
-    }
-
-    metaEl.textContent = '状态：完成，总耗时 ' + (Date.now() - startedAt) + ' ms';
-  } catch (err) {
-    metaEl.textContent = '状态：出错 ' + err;
-  } finally {
-    sendEl.disabled = false;
-  }
-}
-</script>
+  <script src="app.js"></script>
 </body>
 </html>

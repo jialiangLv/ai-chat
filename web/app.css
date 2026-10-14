@@ -1,0 +1,225 @@
+/* ==============================================================================
+   页面样式：仿 ChatGPT 的浅色对话界面。
+   整体是「顶栏 + 可滚动的消息区 + 固定底部的输入区」三段式竖向布局，
+   消息内容限制在一条居中的窄栏里，避免宽屏下一行文字太长不好读。
+   ============================================================================== */
+
+:root {
+  --bg: #ffffff;
+  --text: #0d0d0d;
+  --text-muted: #8e8ea0;
+  --border: #e5e5e5;
+  --bubble: #f4f4f4;
+  --accent: #10a37f;
+  --content-width: 768px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* 作者样式里的 display 会盖掉浏览器给 hidden 属性的 display:none，
+   所以这里显式兜底，保证 JS 里用 .hidden 切换的元素真的藏得住 */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+/* ---------- 顶栏 ---------- */
+
+.topbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar__title {
+  font-weight: 600;
+}
+
+.topbar__status {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ---------- 消息区 ---------- */
+
+.chat {
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+/* 每一行消息：限制宽度并居中，和 ChatGPT 一样两侧留白 */
+.msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 10px 20px;
+}
+
+/* 用户消息靠右，助手消息靠左 */
+.msg--user {
+  justify-content: flex-end;
+}
+
+.msg__avatar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-top: 2px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+}
+
+/* pre-wrap 保留换行与空格；break-word 防止超长英文撑破布局 */
+.msg__body {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 用户消息是一个浅灰气泡 */
+.msg--user .msg__body {
+  max-width: 80%;
+  padding: 8px 16px;
+  border-radius: 18px;
+  background: var(--bubble);
+}
+
+/* 助手消息平铺，不加气泡底 */
+.msg--assistant .msg__body {
+  padding-top: 2px;
+}
+
+/* 流式输出过程中在正文末尾闪烁一个光标 */
+.msg__body--typing::after {
+  content: "▍";
+  color: var(--text-muted);
+  animation: blink 1s step-start infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ---------- 空状态 ---------- */
+
+.welcome {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 15vh 20px 0;
+  text-align: center;
+}
+
+.welcome h1 {
+  margin: 0 0 12px;
+  font-size: 28px;
+}
+
+.welcome p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* ---------- 底部输入区 ---------- */
+
+.composer {
+  flex: 0 0 auto;
+  padding: 0 20px 16px;
+}
+
+.composer__box {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 8px 8px 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 26px;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 4%);
+}
+
+.composer__box:focus-within {
+  border-color: #c9c9c9;
+}
+
+.composer textarea {
+  flex: 1 1 auto;
+  max-height: 200px;
+  padding: 6px 0;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1.6;
+}
+
+.btn {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.btn--send {
+  background: var(--text);
+  color: #fff;
+}
+
+.btn--send:hover {
+  background: #333;
+}
+
+.btn--stop {
+  background: var(--bubble);
+  color: var(--text);
+}
+
+.btn--stop:hover {
+  background: #e5e5e5;
+}
+
+.composer__hint {
+  max-width: var(--content-width);
+  margin: 8px auto 0;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
