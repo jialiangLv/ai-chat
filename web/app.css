@@ -115,6 +115,13 @@ body {
   padding-top: 2px;
 }
 
+/* 真实 token 用量脚注 */
+.msg__usage {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 /* 流式输出过程中在正文末尾闪烁一个光标 */
 .msg__content--typing::after {
   content: "▍";

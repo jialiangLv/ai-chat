@@ -66,6 +66,27 @@ std::string make_delta_line(DeltaKind kind, const std::string& text) {
     return make_sse_line(choice);
 }
 
+// 构造只带用量信息的一条分片，choices 为空数组（对齐 OpenAI stream_options 的约定）
+std::string make_usage_line(const Usage& usage) {
+    nlohmann::json details;
+    details["reasoning_tokens"] = usage.reasoning_tokens;
+
+    nlohmann::json usage_json;
+    usage_json["prompt_tokens"] = usage.prompt_tokens;
+    usage_json["completion_tokens"] = usage.completion_tokens;
+    usage_json["total_tokens"] = usage.total_tokens;
+    usage_json["completion_tokens_details"] = details;
+
+    nlohmann::json chunk;
+    chunk["id"] = "chatcmpl-local";
+    chunk["object"] = "chat.completion.chunk";
+    chunk["created"] = 0;
+    chunk["model"] = "deepseek-flash";
+    chunk["choices"] = nlohmann::json::array();
+    chunk["usage"] = usage_json;
+    return "data: " + chunk.dump() + "\n\n";
+}
+
 // 处理一次聊天请求：解析请求体 → 计算输入 token → 以 SSE 逐字流式返回
 void handle_chat(const httplib::Request& req, httplib::Response& res) {
     set_cors_headers(res);
@@ -92,7 +113,8 @@ void handle_chat(const httplib::Request& req, httplib::Response& res) {
     // 注意：此处不能再调用 res.set_content()，那会写入 Content-Length 使响应退化为非流式
     res.set_chunked_content_provider(
         "text/event-stream",
-        [chat_req](size_t offset, httplib::DataSink& sink) -> bool {
+        [chat_req, estimated_input = tokens.num_tokens](size_t offset,
+                                                        httplib::DataSink& sink) -> bool {
             // offset 是本连接上已写出的字节数；非 0 说明是重复回调，本 provider 只跑一轮
             if (offset > 0) {
                 return false;
@@ -104,6 +126,7 @@ void handle_chat(const httplib::Request& req, httplib::Response& res) {
             }
 
             // 不再需要自己控制节奏：上游模型边生成边吐，天然就是流式的打字机效果
+            Usage usage;
             bool sent_all = generate_deltas(
                 chat_req.user_message,
                 [&sink](DeltaKind kind, const std::string& text) -> bool {
@@ -115,10 +138,22 @@ void handle_chat(const httplib::Request& req, httplib::Response& res) {
                         return false;  // 客户端已关闭连接，不必再空转
                     }
                     return true;
-                });
+                },
+                usage);
 
             if (!sent_all) {
                 return false;  // 客户端中途断开，本轮响应到此为止
+            }
+
+            // 上游统计的真实用量，作为额外一帧转发给前端
+            if (usage.valid) {
+                std::string usage_line = make_usage_line(usage);
+                sink.write(usage_line.data(), usage_line.size());
+                std::cout << "[ai-chat] 上游真实用量 输入=" << usage.prompt_tokens
+                          << " 输出=" << usage.completion_tokens
+                          << "（其中思考 " << usage.reasoning_tokens << "）"
+                          << " 合计=" << usage.total_tokens
+                          << " ｜本地估算输入=" << estimated_input << std::endl;
             }
 
             std::string done = "data: [DONE]\n\n";
@@ -163,8 +198,8 @@ ChatRequest parse_chat_request(const std::string& body) {
     return req;
 }
 
-// 调用大模型接口，把流式返回的内容逐字回调出去
-bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta) {
+// 调用大模型接口，把流式返回的内容逐字回调出去，用量信息写入 usage
+bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta, Usage& usage) {
     std::string api_key = get_env("DEEPSEEK_API_KEY");
     if (api_key.empty()) {
         on_delta(DeltaKind::Content,
@@ -235,7 +270,29 @@ bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta) {
                 }
 
                 try {
-                    auto delta = nlohmann::json::parse(payload)["choices"][0]["delta"];
+                    auto frame = nlohmann::json::parse(payload);
+
+                    // 用量信息出现在整条流的最后一帧，逐字段取值并记下来
+                    if (frame.contains("usage") && frame["usage"].is_object()) {
+                        const auto& u = frame["usage"];
+                        usage.valid = true;
+                        usage.prompt_tokens = u.value("prompt_tokens", 0);
+                        usage.completion_tokens = u.value("completion_tokens", 0);
+                        usage.total_tokens = u.value("total_tokens", 0);
+                        if (u.contains("completion_tokens_details") &&
+                            u["completion_tokens_details"].is_object()) {
+                            usage.reasoning_tokens =
+                                u["completion_tokens_details"].value("reasoning_tokens", 0);
+                        }
+                    }
+
+                    // 内容帧：先确认 choices 非空再取，避免下标越界
+                    if (!frame.contains("choices") || !frame["choices"].is_array() ||
+                        frame["choices"].empty()) {
+                        continue;
+                    }
+                    auto delta = frame["choices"][0]["delta"];
+
                     // reasoning_content 与 content 两个字段每帧都存在，但可能为 null；
                     // 必须先判断类型再取值，否则 get<std::string>() 会抛异常
                     for (const std::string& field : {"reasoning_content", "content"}) {

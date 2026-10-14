@@ -39,8 +39,18 @@ enum class DeltaKind {
 // 内容生成的回调类型：收到一个"字"返回 true 表示继续，返回 false 表示客户端已断开
 using DeltaSink = std::function<bool(DeltaKind kind, const std::string& text)>;
 
-// 调用大模型接口，把流式返回的内容逐字回调出去
-bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta);
+// 一次对话的 token 用量，取自上游响应最后一帧的 usage 字段
+// 这是服务端统计出的真实值，比本地估算准确
+struct Usage {
+    bool valid = false;         // 上游是否返回了用量信息
+    int  prompt_tokens = 0;     // 输入消耗
+    int  completion_tokens = 0; // 输出消耗
+    int  total_tokens = 0;      // 合计
+    int  reasoning_tokens = 0;  // 输出中属于思考过程的部分
+};
+
+// 调用大模型接口，把流式返回的内容逐字回调出去，用量信息写入 usage
+bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta, Usage& usage);
 
 // 在 HTTP 服务上注册聊天相关路由
 void register_chat_routes(httplib::Server& server);

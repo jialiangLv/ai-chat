@@ -72,6 +72,15 @@ function appendMessage(role) {
   body.appendChild(content);
   handle.content = content;
 
+  if (role === 'assistant') {
+    // 真实 token 用量脚注，等到上游返回 usage 才显示
+    const usage = document.createElement('div');
+    usage.className = 'msg__usage';
+    usage.hidden = true;
+    body.appendChild(usage);
+    handle.usage = usage;
+  }
+
   row.appendChild(body);
   chatEl.appendChild(row);
   scrollToBottom();
@@ -89,7 +98,12 @@ function parseEvent(event, out) {
       return;
     }
     try {
-      const delta = JSON.parse(payload).choices?.[0]?.delta;
+      const frame = JSON.parse(payload);
+      // 用量帧的 choices 是空数组，所以要在取 delta 之前先收下来
+      if (frame.usage) {
+        out.usage = frame.usage;
+      }
+      const delta = frame.choices?.[0]?.delta;
       if (!delta) {
         continue;
       }
@@ -104,6 +118,17 @@ function parseEvent(event, out) {
       // JSON 还没收全，忽略，等下一块
     }
   }
+}
+
+// 渲染真实 token 用量脚注
+function renderUsage(el, usage) {
+  let text = '输入 ' + usage.prompt_tokens + ' · 输出 ' + usage.completion_tokens;
+  const reasoning = usage.completion_tokens_details?.reasoning_tokens;
+  if (reasoning) {
+    text += '（其中思考 ' + reasoning + '）';
+  }
+  el.textContent = text + ' · 合计 ' + usage.total_tokens + ' tokens';
+  el.hidden = false;
 }
 
 // 切换「发送 / 停止」按钮的显隐，生成期间保持输入框可用，方便继续打字
@@ -136,7 +161,7 @@ async function send() {
   let firstChunkAt = 0;
   let firstContentAt = 0;
   let contentStarted = false;
-  const out = { reasoning: '', content: '' };
+  const out = { reasoning: '', content: '', usage: null };
 
   setGenerating(true);
   statusEl.textContent = '思考中…';
@@ -200,6 +225,9 @@ async function send() {
         reply.content.textContent = out.content;
       }
 
+      if (out.usage) {
+        renderUsage(reply.usage, out.usage);
+      }
       if (out.content) {
         statusEl.textContent = '作答中…';
       }
