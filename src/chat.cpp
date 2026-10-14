@@ -16,7 +16,11 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
 
+#include "ac_automaton.h"
 #include "json.hpp"
 #include "tokenizer.h"
 
@@ -87,8 +91,35 @@ std::string make_usage_line(const Usage& usage) {
     return "data: " + chunk.dump() + "\n\n";
 }
 
-// 处理一次聊天请求：解析请求体 → 计算输入 token → 以 SSE 逐字流式返回
-void handle_chat(const httplib::Request& req, httplib::Response& res) {
+// 用 SSE 格式返回一段固定的文本，供不需要调用模型的分支复用（如敏感词拦截）
+void stream_fixed_text(httplib::Response& res, const std::string& text) {
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("X-Accel-Buffering", "no");
+
+    res.set_chunked_content_provider(
+        "text/event-stream",
+        [text](size_t offset, httplib::DataSink& sink) -> bool {
+            if (offset > 0) {
+                return false;
+            }
+            std::string opening = make_role_line();
+            if (!sink.write(opening.data(), opening.size())) {
+                return false;
+            }
+            std::string chunk = make_delta_line(DeltaKind::Content, text);
+            if (!sink.write(chunk.data(), chunk.size())) {
+                return false;
+            }
+            std::string done = "data: [DONE]\n\n";
+            sink.write(done.data(), done.size());
+            sink.done();
+            return true;
+        });
+}
+
+// 处理一次聊天请求：解析请求体 → 敏感词检查 → 计算输入 token → 以 SSE 逐字流式返回
+void handle_chat(const httplib::Request& req, httplib::Response& res,
+                 const AcAutomaton& sensitive) {
     set_cors_headers(res);
 
     ChatRequest chat_req = parse_chat_request(req.body);
@@ -97,6 +128,20 @@ void handle_chat(const httplib::Request& req, httplib::Response& res) {
         nlohmann::json err;
         err["error"] = chat_req.parse_error;
         res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    // 第一步：敏感词检查。放在调模型之前，命中就短路返回，连 token 都不必算
+    std::vector<std::string> hits = sensitive.find_all(chat_req.user_message);
+    if (!hits.empty()) {
+        // 命中的词只记在服务端日志里，不回给客户端——否则等于告诉对方该绕开哪个词
+        std::cout << "[ai-chat] 命中敏感词，已拦截：";
+        for (size_t i = 0; i < hits.size(); ++i) {
+            std::cout << (i ? "、" : "") << hits[i];
+        }
+        std::cout << "（" << hits.size() << " 处）" << std::endl;
+
+        stream_fixed_text(res, "触发到了知识盲区，请换个问题再问");
         return;
     }
 
@@ -331,6 +376,18 @@ bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta, Usage
 
 // 在 HTTP 服务上注册聊天相关路由
 void register_chat_routes(httplib::Server& server) {
+    // 敏感词表在启动时加载并构建一次，之后所有请求共用同一份自动机
+    auto sensitive = std::make_shared<AcAutomaton>();
+    std::string dict_path = get_env("SENSITIVE_DICT", "dict/sensitive.txt");
+    size_t word_count = sensitive->load_file(dict_path);
+    if (word_count == 0) {
+        std::cerr << "[ai-chat] 警告：敏感词表为空或读取失败：" << dict_path
+                  << "，敏感词检查将形同虚设" << std::endl;
+    } else {
+        std::cout << "[ai-chat] 敏感词表已加载 " << word_count << " 条：" << dict_path
+                  << std::endl;
+    }
+
     // 跨域预检：前端与后端分开部署时浏览器会先发 OPTIONS，同源托管时用不到
     server.Options("/v1/chat/completions",
                    [](const httplib::Request&, httplib::Response& res) {
@@ -338,5 +395,8 @@ void register_chat_routes(httplib::Server& server) {
                        res.status = 204;
                    });
 
-    server.Post("/v1/chat/completions", handle_chat);
+    server.Post("/v1/chat/completions",
+                [sensitive](const httplib::Request& req, httplib::Response& res) {
+                    handle_chat(req, res, *sensitive);
+                });
 }
