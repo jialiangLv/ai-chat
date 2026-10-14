@@ -32,12 +32,108 @@ body {
 
 body {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;  /* 左边会话栏，右边主体 */
   background: var(--bg);
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   font-size: 16px;
   line-height: 1.7;
+}
+
+/* 主体：顶栏 / 请求体面板 / 消息区 / 输入区 竖向排列 */
+.main {
+  flex: 1 1 auto;
+  min-width: 0;  /* 不写这行，消息里的长内容会把侧边栏挤扁 */
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- 侧边栏 ---------- */
+
+.sidebar {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--border);
+  background: #fafafa;
+}
+
+.sidebar__new {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar__new:hover {
+  border-color: #c9c9c9;
+}
+
+.sidebar__list {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.session-item {
+  display: flex;
+  align-items: center;
+  border-radius: 8px;
+}
+
+.session-item:hover {
+  background: #efefef;
+}
+
+.session-item.is-active {
+  background: #e6e6e6;
+}
+
+.session-item__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.session-item__delete {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  visibility: hidden;  /* 平时藏着，鼠标移到会话上才出现，免得列表很吵 */
+}
+
+.session-item:hover .session-item__delete {
+  visibility: visible;
+}
+
+.session-item__delete:hover {
+  color: #c0392b;
 }
 
 /* ---------- 顶栏 ---------- */

@@ -7,6 +7,13 @@
   <link rel="stylesheet" href="app.css" />
 </head>
 <body>
+  <!-- 侧边栏：会话列表。会话只存在浏览器本地，服务端依旧无状态 -->
+  <aside class="sidebar">
+    <button id="new-session" class="sidebar__new" type="button">＋ 新对话</button>
+    <div class="sidebar__list" id="session-list"></div>
+  </aside>
+
+  <div class="main">
   <!-- 顶栏：标题 + 一行流式状态（首字延迟 / 总耗时），方便直观判断是不是真流式 -->
   <header class="topbar">
     <span class="topbar__title">ai-chat</span>
@@ -43,6 +50,7 @@
     </div>
     <div class="composer__hint">Enter 发送，Shift + Enter 换行</div>
   </footer>
+  </div>
 
   <script src="markdown.js"></script>
   <script src="app.js"></script>

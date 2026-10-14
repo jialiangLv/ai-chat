@@ -14,6 +14,8 @@ const sendEl = document.getElementById('send');
 const stopEl = document.getElementById('stop');
 const payloadEl = document.getElementById('payload');
 const payloadToggleEl = document.getElementById('payload-toggle');
+const sessionListEl = document.getElementById('session-list');
+const newSessionEl = document.getElementById('new-session');
 const sentBlockEl = document.getElementById('sent-block');
 const sentTitleEl = document.getElementById('sent-title');
 const sentTextEl = document.getElementById('sent-text');
@@ -23,24 +25,72 @@ const historyTextEl = document.getElementById('history-text');
 // 当前流式请求的中断句柄，非空表示正在生成，用于「停止生成」
 let controller = null;
 
-// 已发生的对话轮次。每次请求都作为 messages 一起发给服务端——多轮上下文的全部机制
-// 就是这个数组在变长，接口里没有单独的 history 字段。
-// 两条纪律：只放「模型参与过」的轮次；assistant 只放 content，绝不放 reasoning_content
-let history = [];
+/* ---------- 会话与本地持久化 ----------
+   会话只存在浏览器本地，服务端依旧无状态。storage key 带版本号：
+   将来数据结构变了就换成 v2，旧数据自然失效——不用写迁移，也不会读到旧结构而崩 */
+const STORAGE_KEY = 'ai-chat.v1';
 
-// 前端也保留最近若干条，与服务端的截断上限保持一致
-const MAX_HISTORY_MESSAGES = 20;
+// 发给模型的上下文最多带多少条，与服务端的截断上限保持一致
+const MAX_CONTEXT_MESSAGES = 20;
 
-// 把一轮问答计入历史
-function commitTurn(userText, assistantText) {
-  if (!assistantText) {
-    return;
+// 会话列表，元素形如：
+// { id, title, createdAt, updatedAt, messages: [{ role, content, reasoning?, usage?, blocked? }] }
+// messages 里存的是**界面上显示过的全部消息**，被拦截的轮次也在其中（打了 blocked 标记），
+// 这样刷新后能完整还原；发给模型的上下文由它派生，见 contextMessages()
+let sessions = [];
+let activeId = null;
+
+// 当前会话
+function activeSession() {
+  return sessions.find((s) => s.id === activeId) || null;
+}
+
+// 生成一个够用的唯一 id
+function makeId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+// 把全部会话写回本地。容量超限之类的异常不能静默吞掉，否则用户以为存上了
+function saveSessions() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ activeId, sessions }));
+  } catch (err) {
+    statusEl.textContent = '本地保存失败：' + err;
   }
-  history.push({ role: 'user', content: userText });
-  history.push({ role: 'assistant', content: assistantText });
-  if (history.length > MAX_HISTORY_MESSAGES) {
-    history = history.slice(-MAX_HISTORY_MESSAGES);
+}
+
+// 从本地恢复会话，返回是否恢复成功
+function loadSessions() {
+  let data;
+  try {
+    data = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+  } catch (err) {
+    return false;  // 数据损坏就当没有，重新开始
   }
+  if (!data || !Array.isArray(data.sessions) || data.sessions.length === 0) {
+    return false;
+  }
+  sessions = data.sessions;
+  activeId = sessions.some((s) => s.id === data.activeId) ? data.activeId : sessions[0].id;
+  return true;
+}
+
+// 派生出发给模型的上下文：先剔除被拦截的轮次，再截断到最近若干条。
+// 截断后可能以 assistant 开头，要往前推到第一条 user，保证上下文从提问开始
+function contextMessages(session) {
+  if (!session) {
+    return [];
+  }
+  const usable = session.messages.filter((m) => !m.blocked);
+  const trimmed = usable.length > MAX_CONTEXT_MESSAGES
+    ? usable.slice(-MAX_CONTEXT_MESSAGES)
+    : usable;
+
+  let start = 0;
+  while (start < trimmed.length && trimmed[start].role !== 'user') {
+    start += 1;
+  }
+  return trimmed.slice(start).map((m) => ({ role: m.role, content: m.content }));
 }
 
 // 判断消息区是否已经贴在底部，用于决定要不要跟着新内容自动滚动
@@ -114,6 +164,158 @@ function appendMessage(role) {
   return handle;
 }
 
+/* ---------- 会话的增删与渲染 ---------- */
+
+// 新建一个空会话并切过去
+function newSession() {
+  const session = {
+    id: makeId(),
+    title: '新对话',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    messages: [],
+  };
+  sessions.unshift(session);
+  activeId = session.id;
+  lastRequest = null;  // 上一个会话的请求体与这里无关了
+  renderSessionList();
+  renderSession();
+  saveSessions();
+  inputEl.focus();
+}
+
+// 切换到指定会话。正在生成时先中断，避免两条流混在一起
+function switchSession(id) {
+  if (id === activeId) {
+    return;
+  }
+  if (controller) {
+    controller.abort();
+  }
+  activeId = id;
+  lastRequest = null;  // 上一个会话的请求体与这里无关了
+  renderSessionList();
+  renderSession();
+  saveSessions();
+}
+
+// 删除一个会话。删掉的若是当前会话，要顺带切走；一个都不剩就自动新建一个
+function deleteSession(id) {
+  const session = sessions.find((s) => s.id === id);
+  if (!session || !confirm('删除对话「' + session.title + '」？')) {
+    return;
+  }
+  if (id === activeId && controller) {
+    controller.abort();
+  }
+
+  sessions = sessions.filter((s) => s.id !== id);
+  if (!sessions.length) {
+    newSession();
+    return;
+  }
+  if (activeId === id) {
+    activeId = sessions[0].id;
+  }
+  renderSessionList();
+  renderSession();
+  saveSessions();
+}
+
+// 重建侧边栏列表，最近更新的排在最前
+function renderSessionList() {
+  sessionListEl.replaceChildren();
+
+  const ordered = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const session of ordered) {
+    const item = document.createElement('div');
+    item.className = 'session-item' + (session.id === activeId ? ' is-active' : '');
+
+    const title = document.createElement('button');
+    title.type = 'button';
+    title.className = 'session-item__title';
+    title.textContent = session.title;
+    title.title = session.title;  // 标题被截断时，悬停能看到完整的
+    title.addEventListener('click', () => switchSession(session.id));
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'session-item__delete';
+    remove.textContent = '×';
+    remove.title = '删除这个对话';
+    remove.addEventListener('click', () => deleteSession(session.id));
+
+    item.append(title, remove);
+    sessionListEl.appendChild(item);
+  }
+}
+
+// 按当前会话重建整个消息区。切换会话、刷新页面、删除会话时走这里；
+// 正在流式生成时走增量追加，不调它
+function renderSession() {
+  chatEl.querySelectorAll('.msg').forEach((el) => el.remove());
+
+  const session = activeSession();
+  const messages = session ? session.messages : [];
+  welcomeEl.hidden = messages.length > 0;
+
+  for (const message of messages) {
+    if (message.role === 'user') {
+      appendMessage('user').content.textContent = message.content;
+      continue;
+    }
+
+    const handle = appendMessage('assistant');
+    if (message.reasoning) {
+      handle.reasoningBox.hidden = false;
+      handle.reasoningText.textContent = message.reasoning;
+      handle.reasoningBox.classList.add('is-collapsed');  // 恢复时思考区默认收起
+    }
+    handle.content.innerHTML = renderMarkdown(message.content || '');
+    if (message.usage) {
+      renderUsage(handle.usage, message.usage);
+    }
+  }
+
+  scrollToBottom();
+  renderPayload();
+}
+
+// 把一轮问答写进指定会话。
+// 用 sessionId 而不是「当前会话」：生成期间用户可能切走，回复必须落回发起它的那个会话。
+// 被拦截的轮次也写进去（界面上确实发生过，刷新后应该还在），但两条都打标记，
+// 派生上下文时会被整体剔除——只标 assistant 的话，留下那条 user 会变成孤儿
+function commitTurn(sessionId, prompt, out, blocked) {
+  const session = sessions.find((s) => s.id === sessionId);
+  if (!session) {
+    return;  // 会话已被删除
+  }
+  if (!out.content && !out.reasoning) {
+    return;  // 什么都没产出，不留半截记录
+  }
+
+  session.messages.push({ role: 'user', content: prompt, blocked: blocked });
+  session.messages.push({
+    role: 'assistant',
+    content: out.content,
+    reasoning: out.reasoning,
+    usage: out.usage,
+    blocked: blocked,
+  });
+
+  // 第一轮提问兼作会话标题
+  if (session.title === '新对话') {
+    session.title = prompt.slice(0, 20);
+  }
+  session.updatedAt = Date.now();
+
+  saveSessions();
+  renderSessionList();  // 标题可能变了，排序也可能变
+  if (session.id === activeId) {
+    renderPayload();
+  }
+}
+
 // 解析一帧 SSE 事件，把内容按类型累加到 out 上（out = {reasoning, content}）
 function parseEvent(event, out) {
   for (const line of event.split('\n')) {
@@ -164,7 +366,8 @@ let lastRequest = null;
 // 渲染面板。分两块，因为这两个东西很容易被当成一回事：
 //   「本次发出的请求」——实际 POST 出去的内容，其中必然包含本轮的提问，
 //                        哪怕这一轮随后会被敏感词拦截（不发给服务端就无从检查）
-//   「累积的上下文」  —— 之后每一轮都会带上这些；被拦截的轮次不会出现在这里
+//   「累积的上下文」  —— 之后每一轮都会带上这些，由当前会话派生而来；
+//                        被拦截的轮次、以及超长被截断的部分都不会出现在这里
 function renderPayload() {
   if (lastRequest) {
     sentTitleEl.textContent =
@@ -173,11 +376,12 @@ function renderPayload() {
     sentBlockEl.hidden = false;
   }
 
+  const context = contextMessages(activeSession());
   historyTitleEl.textContent =
-    '累积的上下文（' + history.length + ' 条）—— 下一轮会带上这些';
-  historyTextEl.textContent = JSON.stringify({ messages: history }, null, 2);
+    '累积的上下文（' + context.length + ' 条）—— 下一轮会带上这些';
+  historyTextEl.textContent = JSON.stringify({ messages: context }, null, 2);
 
-  payloadToggleEl.textContent = '请求体 (' + history.length + ')';
+  payloadToggleEl.textContent = '请求体 (' + context.length + ')';
 }
 
 // 记录本次实际发出的请求体并刷新面板
@@ -212,6 +416,9 @@ async function send() {
   const reply = appendMessage('assistant');
   reply.content.classList.add('msg__content--typing');
 
+  // 记下发起本轮时所在的会话：生成期间用户可能切走，回复必须落回这里而不是当前会话
+  const sessionId = activeId;
+
   const startedAt = Date.now();
   let firstChunkAt = 0;
   let firstContentAt = 0;
@@ -225,11 +432,11 @@ async function send() {
   controller = new AbortController();
   try {
     // 先把请求体构造出来：一份显示给用户看，一份直接发出去，两者保证是同一个对象
-    // messages = 已有历史 + 本轮输入，这就是「多轮上下文」的全部
+    // messages = 本会话派生出的上下文 + 本轮输入，这就是「多轮上下文」的全部
     const requestBody = {
       model: 'deepseek-flash',
       stream: true,
-      messages: [...history, { role: 'user', content: prompt }]
+      messages: [...contextMessages(activeSession()), { role: 'user', content: prompt }]
     };
     showRequestPayload(requestBody);
 
@@ -302,12 +509,10 @@ async function send() {
       }
     }
 
-    // 本轮结束。只放 out.content（正文），思考内容 out.reasoning 绝不入历史——
-    // 它是模型的内部过程，回灌会污染后续推理且白烧 token。
-    // 被拦截的轮次模型根本没被调用，也一并跳过，否则等于把服务端的话术冒充成模型说过的话
-    if (!blocked) {
-      commitTurn(prompt, out.content);
-    }
+    // 本轮结束，写进会话。写进会话的 assistant 里会带上 reasoning 供界面还原，
+    // 但派生上下文时只取 content——思考内容是模型的内部过程，
+    // 回灌给模型会污染后续推理，而且白烧 token
+    commitTurn(sessionId, prompt, out, blocked);
 
     const total = Date.now() - startedAt;
     let summary = '完成，共 ' + total + ' ms';
@@ -317,10 +522,8 @@ async function send() {
     statusEl.textContent = summary;
   } catch (err) {
     if (err.name === 'AbortError') {
-      // 被中断时把已经收到的部分计入历史：模型确实产出了这些内容，如实记录
-      if (!blocked) {
-        commitTurn(prompt, out.content);
-      }
+      // 被中断时把已经收到的部分写进会话：模型确实产出了这些内容，如实记录
+      commitTurn(sessionId, prompt, out, blocked);
       statusEl.textContent = '已停止生成（思考 ' + out.reasoning.length + ' 字，正文 ' +
         out.content.length + ' 字）';
     } else {
@@ -384,4 +587,13 @@ inputEl.addEventListener('keydown', (e) => {
   }
 });
 
+newSessionEl.addEventListener('click', newSession);
+
+// 启动：能恢复本地会话就恢复，否则开一个新的空会话
+if (loadSessions()) {
+  renderSessionList();
+  renderSession();
+} else {
+  newSession();
+}
 inputEl.focus();
