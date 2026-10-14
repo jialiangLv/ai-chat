@@ -12,9 +12,36 @@ const statusEl = document.getElementById('status');
 const inputEl = document.getElementById('input');
 const sendEl = document.getElementById('send');
 const stopEl = document.getElementById('stop');
+const payloadEl = document.getElementById('payload');
+const payloadToggleEl = document.getElementById('payload-toggle');
+const sentBlockEl = document.getElementById('sent-block');
+const sentTitleEl = document.getElementById('sent-title');
+const sentTextEl = document.getElementById('sent-text');
+const historyTitleEl = document.getElementById('history-title');
+const historyTextEl = document.getElementById('history-text');
 
 // 当前流式请求的中断句柄，非空表示正在生成，用于「停止生成」
 let controller = null;
+
+// 已发生的对话轮次。每次请求都作为 messages 一起发给服务端——多轮上下文的全部机制
+// 就是这个数组在变长，接口里没有单独的 history 字段。
+// 两条纪律：只放「模型参与过」的轮次；assistant 只放 content，绝不放 reasoning_content
+let history = [];
+
+// 前端也保留最近若干条，与服务端的截断上限保持一致
+const MAX_HISTORY_MESSAGES = 20;
+
+// 把一轮问答计入历史
+function commitTurn(userText, assistantText) {
+  if (!assistantText) {
+    return;
+  }
+  history.push({ role: 'user', content: userText });
+  history.push({ role: 'assistant', content: assistantText });
+  if (history.length > MAX_HISTORY_MESSAGES) {
+    history = history.slice(-MAX_HISTORY_MESSAGES);
+  }
+}
 
 // 判断消息区是否已经贴在底部，用于决定要不要跟着新内容自动滚动
 function isNearBottom() {
@@ -131,6 +158,34 @@ function renderUsage(el, usage) {
   el.hidden = false;
 }
 
+// 最近一次实际发出的请求体
+let lastRequest = null;
+
+// 渲染面板。分两块，因为这两个东西很容易被当成一回事：
+//   「本次发出的请求」——实际 POST 出去的内容，其中必然包含本轮的提问，
+//                        哪怕这一轮随后会被敏感词拦截（不发给服务端就无从检查）
+//   「累积的上下文」  —— 之后每一轮都会带上这些；被拦截的轮次不会出现在这里
+function renderPayload() {
+  if (lastRequest) {
+    sentTitleEl.textContent =
+      '本次发出的请求（' + lastRequest.messages.length + ' 条）';
+    sentTextEl.textContent = JSON.stringify(lastRequest, null, 2);
+    sentBlockEl.hidden = false;
+  }
+
+  historyTitleEl.textContent =
+    '累积的上下文（' + history.length + ' 条）—— 下一轮会带上这些';
+  historyTextEl.textContent = JSON.stringify({ messages: history }, null, 2);
+
+  payloadToggleEl.textContent = '请求体 (' + history.length + ')';
+}
+
+// 记录本次实际发出的请求体并刷新面板
+function showRequestPayload(body) {
+  lastRequest = body;
+  renderPayload();
+}
+
 // 切换「发送 / 停止」按钮的显隐，生成期间保持输入框可用，方便继续打字
 function setGenerating(generating) {
   sendEl.hidden = generating;
@@ -161,6 +216,7 @@ async function send() {
   let firstChunkAt = 0;
   let firstContentAt = 0;
   let contentStarted = false;
+  let blocked = false;  // 声明在外层：catch 分支也要用它
   const out = { reasoning: '', content: '', usage: null };
 
   setGenerating(true);
@@ -168,14 +224,19 @@ async function send() {
 
   controller = new AbortController();
   try {
+    // 先把请求体构造出来：一份显示给用户看，一份直接发出去，两者保证是同一个对象
+    // messages = 已有历史 + 本轮输入，这就是「多轮上下文」的全部
+    const requestBody = {
+      model: 'deepseek-flash',
+      stream: true,
+      messages: [...history, { role: 'user', content: prompt }]
+    };
+    showRequestPayload(requestBody);
+
     const resp = await fetch('/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'deepseek-flash',
-        stream: true,
-        messages: [{ role: 'user', content: prompt }]
-      }),
+      body: JSON.stringify(requestBody),
       signal: controller.signal
     });
 
@@ -184,6 +245,9 @@ async function send() {
       statusEl.textContent = '';
       return;
     }
+
+    // 服务端用这个头标记「本轮被拦截，模型没有参与」——这一轮不该进上下文
+    blocked = resp.headers.get('X-Ai-Chat-Blocked') === '1';
 
     const reader = resp.body.getReader();
     // stream 模式下，跨分块被切断的半个 UTF-8 字符会被解码器自己留住拼回
@@ -236,6 +300,13 @@ async function send() {
       }
     }
 
+    // 本轮结束。只放 out.content（正文），思考内容 out.reasoning 绝不入历史——
+    // 它是模型的内部过程，回灌会污染后续推理且白烧 token。
+    // 被拦截的轮次模型根本没被调用，也一并跳过，否则等于把服务端的话术冒充成模型说过的话
+    if (!blocked) {
+      commitTurn(prompt, out.content);
+    }
+
     const total = Date.now() - startedAt;
     let summary = '完成，共 ' + total + ' ms';
     if (firstContentAt) {
@@ -244,6 +315,10 @@ async function send() {
     statusEl.textContent = summary;
   } catch (err) {
     if (err.name === 'AbortError') {
+      // 被中断时把已经收到的部分计入历史：模型确实产出了这些内容，如实记录
+      if (!blocked) {
+        commitTurn(prompt, out.content);
+      }
       statusEl.textContent = '已停止生成（思考 ' + out.reasoning.length + ' 字，正文 ' +
         out.content.length + ' 字）';
     } else {
@@ -254,11 +329,16 @@ async function send() {
     reply.content.classList.remove('msg__content--typing');
     controller = null;
     setGenerating(false);
+    renderPayload();  // 本轮结束后刷新「累积的上下文」
     inputEl.focus();
   }
 }
 
 sendEl.addEventListener('click', send);
+
+payloadToggleEl.addEventListener('click', () => {
+  payloadEl.hidden = !payloadEl.hidden;
+});
 
 stopEl.addEventListener('click', () => {
   // 中断 fetch，服务端会因此写失败，进而中断对上游模型的请求

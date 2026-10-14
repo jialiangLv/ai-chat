@@ -32,11 +32,36 @@ std::string get_env(const char* key, const std::string& default_val = "") {
     return (val && *val) ? std::string(val) : default_val;
 }
 
+// 敏感词拦截时回给前端的标记响应头，前端据此决定这一轮要不要计入上下文
+constexpr const char* kBlockedHeader = "X-Ai-Chat-Blocked";
+
+// 最多携带的消息条数（一问一答算两条），超出就丢掉最早的部分
+constexpr size_t kMaxHistoryMessages = 20;
+
+// 历史过长时只保留最近若干条，并保证数组以 user 消息开头——否则开头的 assistant 会成为孤儿
+void trim_messages(std::vector<Message>& messages) {
+    if (messages.size() <= kMaxHistoryMessages) {
+        return;
+    }
+    messages.erase(messages.begin(), messages.end() - kMaxHistoryMessages);
+
+    // 截断点可能落在一条问答的中间，把开头的 assistant 一并推掉
+    size_t drop = 0;
+    while (drop < messages.size() && messages[drop].role != "user") {
+        ++drop;
+    }
+    if (drop > 0 && drop < messages.size()) {
+        messages.erase(messages.begin(), messages.begin() + drop);
+    }
+}
+
 // 统一设置跨域响应头，便于将来前端与后端分开部署时直接跨域调用
 void set_cors_headers(httplib::Response& res) {
     res.set_header("Access-Control-Allow-Origin", "*");
     res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
     res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    // 自定义响应头默认不暴露给跨域的前端，要显式列出来，否则前端读不到它
+    res.set_header("Access-Control-Expose-Headers", kBlockedHeader);
 }
 
 // 把单个 choices[0] 分片包装成完整的 SSE 数据行（含结尾空行）
@@ -92,9 +117,11 @@ std::string make_usage_line(const Usage& usage) {
 }
 
 // 用 SSE 格式返回一段固定的文本，供不需要调用模型的分支复用（如敏感词拦截）
+// 带上标记响应头：这一轮模型并没有参与，前端不该把它计入发给模型的上下文
 void stream_fixed_text(httplib::Response& res, const std::string& text) {
     res.set_header("Cache-Control", "no-cache");
     res.set_header("X-Accel-Buffering", "no");
+    res.set_header(kBlockedHeader, "1");
 
     res.set_chunked_content_provider(
         "text/event-stream",
@@ -131,25 +158,46 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
         return;
     }
 
-    // 第一步：敏感词检查。放在调模型之前，命中就短路返回，连 token 都不必算
-    std::vector<std::string> hits = sensitive.find_all(chat_req.user_message);
-    if (!hits.empty()) {
-        // 命中的词只记在服务端日志里，不回给客户端——否则等于告诉对方该绕开哪个词
-        std::cout << "[ai-chat] 命中敏感词，已拦截：";
-        for (size_t i = 0; i < hits.size(); ++i) {
-            std::cout << (i ? "、" : "") << hits[i];
-        }
-        std::cout << "（" << hits.size() << " 处）" << std::endl;
+    // 历史过长就截断，避免请求体随对话无限增长
+    trim_messages(chat_req.messages);
 
-        stream_fixed_text(res, "触发到了知识盲区，请换个问题再问");
-        return;
+    // 第一步：敏感词检查。历史是客户端给的、不可信，所以要全量复查；
+    // 但两类消息的处置不同——不能因为陈年旧事把新对话锁死
+    const std::string kFiltered = "[该内容已被过滤]";
+    for (size_t i = 0; i < chat_req.messages.size(); ++i) {
+        Message& msg = chat_req.messages[i];
+        if (msg.role != "user") {
+            continue;
+        }
+
+        std::vector<std::string> hits = sensitive.find_all(msg.content);
+        if (hits.empty()) {
+            continue;
+        }
+
+        // 命中的词只记在服务端日志里，不回给客户端——否则等于告诉对方该绕开哪个词
+        std::cout << "[ai-chat] 命中敏感词：";
+        for (size_t k = 0; k < hits.size(); ++k) {
+            std::cout << (k ? "、" : "") << hits[k];
+        }
+
+        // 本轮输入命中（最后一条必定是本轮的 user 消息）→ 拒绝整个请求，改一句重发即可
+        if (i + 1 == chat_req.messages.size()) {
+            std::cout << "（本轮输入 " << hits.size() << " 处）→ 已拒绝" << std::endl;
+            stream_fixed_text(res, "触发到了知识盲区，请换个问题再问");
+            return;
+        }
+
+        // 历史消息命中 → 就地替换成占位符，本轮照常进行
+        std::cout << "（历史第 " << i << " 条）→ 已清洗" << std::endl;
+        msg.content = kFiltered;
     }
 
-    // 第二步：token 计算。当前是本地近似值，只打印到日志，暂不参与业务
-    TokenResult tokens = count_tokens(chat_req.user_message);
+    // 第二步：token 计算。统计本轮输入，当前是本地近似值，只打印到日志
+    TokenResult tokens = count_tokens(chat_req.messages.back().content);
     std::cout << "[ai-chat] 收到请求 model=" << chat_req.model
-              << " 输入 token 估算=" << tokens.num_tokens
-              << " 内容=\"" << chat_req.user_message << "\"" << std::endl;
+              << " 本轮输入 token 估算=" << tokens.num_tokens
+              << "，共 " << chat_req.messages.size() << " 条消息" << std::endl;
 
     // 关闭各级缓冲，否则客户端要等全部内容生成完才能看到数据
     res.set_header("Cache-Control", "no-cache");
@@ -173,7 +221,7 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
             // 不再需要自己控制节奏：上游模型边生成边吐，天然就是流式的打字机效果
             Usage usage;
             bool sent_all = generate_deltas(
-                chat_req.user_message,
+                chat_req.messages,
                 [&sink](DeltaKind kind, const std::string& text) -> bool {
                     std::string chunk = make_delta_line(kind, text);
                     if (!sink.write(chunk.data(), chunk.size())) {
@@ -210,7 +258,7 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
 
 }  // namespace
 
-// 从 HTTP 请求体解析出 ChatRequest，取 messages 中最后一条 role=user 的 content 作为本轮输入
+// 从 HTTP 请求体解析出 ChatRequest，messages 数组即完整对话历史，最后一条是用户本轮输入
 ChatRequest parse_chat_request(const std::string& body) {
     ChatRequest req;
     try {
@@ -224,16 +272,26 @@ ChatRequest parse_chat_request(const std::string& body) {
         }
 
         if (body_json.contains("messages") && body_json["messages"].is_array()) {
-            for (const auto& message : body_json["messages"]) {
-                if (message.contains("role") && message["role"] == "user" &&
-                    message.contains("content") && message["content"].is_string()) {
-                    req.user_message = message["content"].get<std::string>();
+            for (const auto& item : body_json["messages"]) {
+                // 结构不完整的消息直接跳过，不让它影响整条请求
+                if (!item.is_object() || !item.contains("role") || !item["role"].is_string() ||
+                    !item.contains("content") || !item["content"].is_string()) {
+                    continue;
                 }
+                Message message;
+                message.role = item["role"].get<std::string>();
+                message.content = item["content"].get<std::string>();
+                req.messages.push_back(std::move(message));
             }
         }
 
-        if (req.user_message.empty()) {
-            req.parse_error = "messages 中缺少 role=user 的 content";
+        if (req.messages.empty()) {
+            req.parse_error = "messages 为空或格式不正确";
+            return req;
+        }
+        // 最后一条必须是用户消息，它代表本轮输入
+        if (req.messages.back().role != "user") {
+            req.parse_error = "messages 的最后一条必须是 role=user 的消息";
             return req;
         }
         req.parse_ok = true;
@@ -243,8 +301,9 @@ ChatRequest parse_chat_request(const std::string& body) {
     return req;
 }
 
-// 调用大模型接口，把流式返回的内容逐字回调出去，用量信息写入 usage
-bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta, Usage& usage) {
+// 调用大模型接口，把整段对话发过去并把流式返回的内容逐字回调出去，用量信息写入 usage
+bool generate_deltas(const std::vector<Message>& messages, const DeltaSink& on_delta,
+                     Usage& usage) {
     std::string api_key = get_env("DEEPSEEK_API_KEY");
     if (api_key.empty()) {
         on_delta(DeltaKind::Content,
@@ -273,14 +332,19 @@ bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta, Usage
     client.set_connection_timeout(10, 0);  // 连不上就尽快失败，别让用户干等
     client.set_read_timeout(60, 0);        // 默认 300 秒过于宽松，收紧一些
 
-    nlohmann::json message;
-    message["role"] = "user";
-    message["content"] = prompt;
+    // 把整段对话原样组装成请求体的 messages 数组
+    nlohmann::json message_array = nlohmann::json::array();
+    for (const Message& message : messages) {
+        nlohmann::json item;
+        item["role"] = message.role;
+        item["content"] = message.content;
+        message_array.push_back(std::move(item));
+    }
 
     nlohmann::json body;
     body["model"] = model;
     body["stream"] = true;
-    body["messages"] = nlohmann::json::array({message});
+    body["messages"] = std::move(message_array);
 
     // 上游一个数据块不等于完整的一行，所以要跨回调累积，只处理已经切完整的行
     std::string buffer;

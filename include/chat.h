@@ -15,16 +15,23 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "httplib.h"
 
+// 一条对话消息
+struct Message {
+    std::string role;     // "user" / "assistant" / "system"
+    std::string content;
+};
+
 // 一次对话请求的最小字段，字段名对齐 OpenAI /v1/chat/completions 的子集
 struct ChatRequest {
-    std::string model = "deepseek-flash";  // 请求指定的模型名
-    std::string user_message;              // messages 中最后一条 role=user 的 content
-    bool        stream = true;             // 是否流式返回
-    bool        parse_ok = false;          // 解析是否成功
-    std::string parse_error;               // 解析失败时的原因，直接回给客户端
+    std::string          model = "deepseek-flash";  // 请求指定的模型名
+    std::vector<Message> messages;                  // 完整对话，最后一条是用户本轮输入
+    bool                 stream = true;             // 是否流式返回
+    bool                 parse_ok = false;          // 解析是否成功
+    std::string          parse_error;               // 解析失败时的原因，直接回给客户端
 };
 
 // 从 HTTP 请求体（JSON 字符串）解析出 ChatRequest
@@ -49,8 +56,8 @@ struct Usage {
     int  reasoning_tokens = 0;  // 输出中属于思考过程的部分
 };
 
-// 调用大模型接口，把流式返回的内容逐字回调出去，用量信息写入 usage
-bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta, Usage& usage);
+// 调用大模型接口，把整段对话发过去并把流式返回的内容逐字回调出去，用量信息写入 usage
+bool generate_deltas(const std::vector<Message>& messages, const DeltaSink& on_delta, Usage& usage);
 
 // 在 HTTP 服务上注册聊天相关路由
 void register_chat_routes(httplib::Server& server);

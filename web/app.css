@@ -60,6 +60,63 @@ body {
   font-size: 13px;
 }
 
+.topbar__toggle {
+  margin-left: auto;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.topbar__toggle:hover {
+  border-color: #c9c9c9;
+  color: var(--text);
+}
+
+/* ---------- 请求体面板 ---------- */
+
+.payload {
+  flex: 0 0 auto;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: #fafafa;
+}
+
+.payload__block {
+  max-width: var(--content-width);
+  margin: 0 auto 14px;
+}
+
+.payload__block:last-child {
+  margin-bottom: 0;
+}
+
+.payload__title {
+  margin-bottom: 4px;
+  color: #666;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.payload pre {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: #444;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ---------- 消息区 ---------- */
 
 .chat {

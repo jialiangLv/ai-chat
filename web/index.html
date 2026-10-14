@@ -11,7 +11,20 @@
   <header class="topbar">
     <span class="topbar__title">ai-chat</span>
     <span class="topbar__status" id="status"></span>
+    <button id="payload-toggle" class="topbar__toggle" type="button">请求体</button>
   </header>
+
+  <!-- 请求体面板：分两块显示，因为「本次发出的请求」和「累积的上下文」不是一回事 -->
+  <section class="payload" id="payload" hidden>
+    <div class="payload__block" id="sent-block" hidden>
+      <div class="payload__title" id="sent-title"></div>
+      <pre id="sent-text"></pre>
+    </div>
+    <div class="payload__block">
+      <div class="payload__title" id="history-title"></div>
+      <pre id="history-text"></pre>
+    </div>
+  </section>
 
   <!-- 消息区：所有对话气泡都插在这里 -->
   <main class="chat" id="chat">
