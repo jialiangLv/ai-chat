@@ -12,15 +12,21 @@
 
 #include "chat.h"
 
-#include <chrono>
+#include <algorithm>
+#include <cstdlib>
 #include <exception>
 #include <iostream>
-#include <thread>
 
 #include "json.hpp"
 #include "tokenizer.h"
 
 namespace {
+
+// 读取环境变量，未设置或为空时返回默认值
+std::string get_env(const char* key, const std::string& default_val = "") {
+    const char* val = std::getenv(key);
+    return (val && *val) ? std::string(val) : default_val;
+}
 
 // 统一设置跨域响应头，便于将来前端与后端分开部署时直接跨域调用
 void set_cors_headers(httplib::Response& res) {
@@ -50,11 +56,12 @@ std::string make_role_line() {
     return make_sse_line(choice);
 }
 
-// 构造一个内容分片：delta.content 就是本次要"吐"出来的那个字
-std::string make_content_line(const std::string& content) {
+// 构造一个流式分片：思考过程写进 reasoning_content，正式回答写进 content
+// 字段名与上游接口保持一致，前端据此把两类内容分别渲染
+std::string make_delta_line(DeltaKind kind, const std::string& text) {
     nlohmann::json choice;
     choice["index"] = 0;
-    choice["delta"]["content"] = content;
+    choice["delta"][kind == DeltaKind::Reasoning ? "reasoning_content" : "content"] = text;
     choice["finish_reason"] = nullptr;
     return make_sse_line(choice);
 }
@@ -96,17 +103,17 @@ void handle_chat(const httplib::Request& req, httplib::Response& res) {
                 return false;
             }
 
+            // 不再需要自己控制节奏：上游模型边生成边吐，天然就是流式的打字机效果
             bool sent_all = generate_deltas(
                 chat_req.user_message,
-                [&sink](const std::string& unit) -> bool {
-                    std::string chunk = make_content_line(unit);
+                [&sink](DeltaKind kind, const std::string& text) -> bool {
+                    std::string chunk = make_delta_line(kind, text);
                     if (!sink.write(chunk.data(), chunk.size())) {
                         return false;
                     }
                     if (!sink.is_writable()) {
                         return false;  // 客户端已关闭连接，不必再空转
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 打字机节奏
                     return true;
                 });
 
@@ -156,19 +163,111 @@ ChatRequest parse_chat_request(const std::string& body) {
     return req;
 }
 
-// 逐字产出回复内容：当前返回服务端写死的假文字，后续替换为真实模型的流式调用
+// 调用大模型接口，把流式返回的内容逐字回调出去
 bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta) {
-    std::string reply =
-        "你好，我是 ai-chat 的最小演示版。"
-        "你刚才说的是：「" + prompt + "」。"
-        "目前我还不联网、不调用任何模型，这段文字是服务端写死的，"
-        "只用来验证「接收请求 → 解析请求 → 计算 token → 流式返回」这条链路是通的。";
+    std::string api_key = get_env("DEEPSEEK_API_KEY");
+    if (api_key.empty()) {
+        on_delta(DeltaKind::Content,
+                 "[配置缺失] 没有读到 DEEPSEEK_API_KEY，请检查项目根目录下的 .env");
+        return true;
+    }
 
-    // 按 UTF-8 码点逐字吐出，避免把一个汉字拆成三个字节导致乱码
-    for (const std::string& unit : split_utf8_units(reply)) {
-        if (!on_delta(unit)) {
-            return false;
-        }
+    std::string model = get_env("DEEPSEEK_MODEL", "deepseek-flash");
+    std::string base_url = get_env("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1");
+
+    // 把 base_url 拆成「scheme://主机」和「路径前缀」两段，
+    // 因为 httplib::Client 的构造函数只接受主机部分：
+    //   https://api.deepseek.com/v1  →  https://api.deepseek.com  +  /v1
+    std::string host = base_url;
+    std::string path_prefix;
+    size_t scheme_end = base_url.find("://");
+    size_t path_begin = (scheme_end == std::string::npos)
+                            ? std::string::npos
+                            : base_url.find('/', scheme_end + 3);
+    if (path_begin != std::string::npos) {
+        host = base_url.substr(0, path_begin);
+        path_prefix = base_url.substr(path_begin);
+    }
+
+    httplib::Client client(host);
+    client.set_connection_timeout(10, 0);  // 连不上就尽快失败，别让用户干等
+    client.set_read_timeout(60, 0);        // 默认 300 秒过于宽松，收紧一些
+
+    nlohmann::json message;
+    message["role"] = "user";
+    message["content"] = prompt;
+
+    nlohmann::json body;
+    body["model"] = model;
+    body["stream"] = true;
+    body["messages"] = nlohmann::json::array({message});
+
+    // 上游一个数据块不等于完整的一行，所以要跨回调累积，只处理已经切完整的行
+    std::string buffer;
+    // 留一份最前面的原始字节，用于上游返回非 200 时给出可读的错误信息
+    std::string raw_head;
+
+    auto res = client.Post(
+        path_prefix + "/chat/completions",
+        {{"Authorization", "Bearer " + api_key}},
+        body.dump(), "application/json",
+        [&](const char* data, size_t length) -> bool {
+            if (raw_head.size() < 512) {
+                raw_head.append(data, std::min(length, 512 - raw_head.size()));
+            }
+            buffer.append(data, length);
+
+            size_t newline;
+            while ((newline = buffer.find('\n')) != std::string::npos) {
+                std::string line = buffer.substr(0, newline);
+                buffer.erase(0, newline + 1);
+                // SSE 规范允许 \r\n 行尾，去掉可能残留的 \r
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                if (line.compare(0, 6, "data: ") != 0) {
+                    continue;  // 帧之间的空行等非数据行，直接跳过
+                }
+
+                std::string payload = line.substr(6);
+                if (payload == "[DONE]") {
+                    return true;
+                }
+
+                try {
+                    auto delta = nlohmann::json::parse(payload)["choices"][0]["delta"];
+                    // reasoning_content 与 content 两个字段每帧都存在，但可能为 null；
+                    // 必须先判断类型再取值，否则 get<std::string>() 会抛异常
+                    for (const std::string& field : {"reasoning_content", "content"}) {
+                        if (!delta.contains(field) || !delta[field].is_string()) {
+                            continue;
+                        }
+                        std::string text = delta[field].get<std::string>();
+                        if (text.empty()) {
+                            continue;
+                        }
+                        DeltaKind kind = (field == "reasoning_content")
+                                             ? DeltaKind::Reasoning
+                                             : DeltaKind::Content;
+                        if (!on_delta(kind, text)) {
+                            return false;  // 客户端已断开，顺带中断上游请求
+                        }
+                    }
+                } catch (const std::exception&) {
+                    // 解析不了的帧跳过即可，不影响后续内容
+                }
+            }
+            return true;
+        });
+
+    if (!res) {
+        on_delta(DeltaKind::Content,
+                 "[连接失败] " + httplib::to_string(res.error()));
+        return true;
+    }
+    if (res->status != 200) {
+        on_delta(DeltaKind::Content,
+                 "[上游错误] HTTP " + std::to_string(res->status) + "：" + raw_head);
     }
     return true;
 }

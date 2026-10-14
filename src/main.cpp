@@ -11,6 +11,7 @@
  */
 
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -23,7 +24,46 @@ std::string get_env_var(const char* key, const std::string& default_val) {
     return val ? std::string(val) : default_val;
 }
 
+// 去掉字符串两端的空白字符（含 Windows 换行残留的 \r）
+std::string trim(const std::string& s) {
+    size_t begin = s.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+        return "";
+    }
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(begin, end - begin + 1);
+}
+
+// 极简 .env 解析：逐行读 KEY=VALUE，跳过空行与 # 注释行，写入进程环境
+// 已存在的环境变量不覆盖，这样可以用命令行临时覆盖 .env 里的值；没有该文件也不算错误
+void load_dotenv(const std::string& path) {
+    std::ifstream file(path);
+    if (!file) {
+        return;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        std::string trimmed = trim(line);
+        if (trimmed.empty() || trimmed[0] == '#') {
+            continue;
+        }
+        size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        std::string key = trim(trimmed.substr(0, eq));
+        std::string value = trim(trimmed.substr(eq + 1));
+        if (!key.empty() && std::getenv(key.c_str()) == nullptr) {
+            setenv(key.c_str(), value.c_str(), 1);
+        }
+    }
+}
+
 int main() {
+    // 先把 .env 里的配置读进环境，后续统一用 get_env_var 取值
+    load_dotenv(".env");
+
     int port = std::stoi(get_env_var("PORT", "8080"));
     std::string web_root = get_env_var("WEB_ROOT", "./web");
 

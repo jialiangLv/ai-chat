@@ -2,6 +2,8 @@
    页面逻辑：把输入发到 POST /v1/chat/completions，并把流式返回的内容逐字渲染。
    流式解析的关键在于：网络一次 read 拿到的分块可能切断一个 UTF-8 字符，
    也可能只含半个 SSE 帧，所以必须先解码再缓存、按空行切出完整帧才解析。
+   模型会先输出一段思考过程（reasoning_content）再输出正式回答（content），
+   两者分别渲染：思考用灰色小字，正式回答开始后自动折叠。
    ============================================================================== */
 
 const chatEl = document.getElementById('chat');
@@ -24,7 +26,7 @@ function scrollToBottom() {
   chatEl.scrollTop = chatEl.scrollHeight;
 }
 
-// 往消息区追加一条消息，返回可继续写入正文的元素
+// 往消息区追加一条消息，返回可继续写入的元素句柄
 function appendMessage(role) {
   welcomeEl.hidden = true;
 
@@ -41,34 +43,67 @@ function appendMessage(role) {
 
   const body = document.createElement('div');
   body.className = 'msg__body';
-  row.appendChild(body);
+  const handle = { body };
 
+  if (role === 'assistant') {
+    // 思考区域：灰色小字，点击标题可折叠/展开
+    const box = document.createElement('div');
+    box.className = 'reasoning';
+    box.hidden = true;
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'reasoning__toggle';
+    toggle.textContent = '思考过程';
+    toggle.addEventListener('click', () => box.classList.toggle('is-collapsed'));
+
+    const text = document.createElement('div');
+    text.className = 'reasoning__text';
+
+    box.append(toggle, text);
+    body.appendChild(box);
+
+    handle.reasoningBox = box;
+    handle.reasoningText = text;
+  }
+
+  const content = document.createElement('div');
+  content.className = 'msg__content';
+  body.appendChild(content);
+  handle.content = content;
+
+  row.appendChild(body);
   chatEl.appendChild(row);
   scrollToBottom();
-  return body;
+  return handle;
 }
 
-// 解析一帧 SSE 事件，返回其中 delta.content 拼成的文本（没有内容时返回空串）
-function parseEvent(event) {
-  let text = '';
+// 解析一帧 SSE 事件，把内容按类型累加到 out 上（out = {reasoning, content}）
+function parseEvent(event, out) {
   for (const line of event.split('\n')) {
     if (!line.startsWith('data:')) {
       continue;
     }
     const payload = line.slice(5).trim();
     if (payload === '[DONE]') {
-      return text;
+      return;
     }
     try {
-      const delta = JSON.parse(payload).choices?.[0]?.delta?.content;
-      if (delta) {
-        text += delta;
+      const delta = JSON.parse(payload).choices?.[0]?.delta;
+      if (!delta) {
+        continue;
+      }
+      // 两个字段每帧都存在但可能为 null，所以要判类型
+      if (typeof delta.reasoning_content === 'string') {
+        out.reasoning += delta.reasoning_content;
+      }
+      if (typeof delta.content === 'string') {
+        out.content += delta.content;
       }
     } catch (e) {
       // JSON 还没收全，忽略，等下一块
     }
   }
-  return text;
 }
 
 // 切换「发送 / 停止」按钮的显隐，生成期间保持输入框可用，方便继续打字
@@ -93,16 +128,18 @@ async function send() {
   inputEl.value = '';
   autoResize();
 
-  appendMessage('user').textContent = prompt;
-  const replyEl = appendMessage('assistant');
-  replyEl.classList.add('msg__body--typing');
+  appendMessage('user').content.textContent = prompt;
+  const reply = appendMessage('assistant');
+  reply.content.classList.add('msg__content--typing');
 
   const startedAt = Date.now();
   let firstChunkAt = 0;
-  let replyText = '';
+  let firstContentAt = 0;
+  let contentStarted = false;
+  const out = { reasoning: '', content: '' };
 
   setGenerating(true);
-  statusEl.textContent = '生成中…';
+  statusEl.textContent = '思考中…';
 
   controller = new AbortController();
   try {
@@ -118,7 +155,7 @@ async function send() {
     });
 
     if (!resp.ok) {
-      replyEl.textContent = '请求失败：HTTP ' + resp.status;
+      reply.content.textContent = '请求失败：HTTP ' + resp.status;
       statusEl.textContent = '';
       return;
     }
@@ -134,10 +171,6 @@ async function send() {
         break;
       }
 
-      if (!firstChunkAt) {
-        firstChunkAt = Date.now();
-      }
-
       // 先判断用户有没有手动往上翻：翻了就别强行拽回底部
       const stickToBottom = isNearBottom();
       buffer += decoder.decode(value, { stream: true });
@@ -147,27 +180,50 @@ async function send() {
       while ((sep = buffer.indexOf('\n\n')) >= 0) {
         const event = buffer.slice(0, sep);
         buffer = buffer.slice(sep + 2);
-        replyText += parseEvent(event);
+        parseEvent(event, out);
       }
 
-      replyEl.textContent = replyText;
+      if (out.reasoning) {
+        if (!firstChunkAt) {
+          firstChunkAt = Date.now();
+        }
+        reply.reasoningBox.hidden = false;
+        reply.reasoningText.textContent = out.reasoning;
+      }
+
+      if (out.content) {
+        if (!contentStarted) {
+          contentStarted = true;
+          firstContentAt = Date.now();
+          reply.reasoningBox.classList.add('is-collapsed');  // 开始作答，收起思考
+        }
+        reply.content.textContent = out.content;
+      }
+
+      if (out.content) {
+        statusEl.textContent = '作答中…';
+      }
       if (stickToBottom) {
         scrollToBottom();
       }
     }
 
-    statusEl.textContent =
-      '首字 ' + (firstChunkAt - startedAt) + ' ms · 完成，共 ' + (Date.now() - startedAt) + ' ms';
+    const total = Date.now() - startedAt;
+    let summary = '完成，共 ' + total + ' ms';
+    if (firstContentAt) {
+      summary = '思考 ' + (firstContentAt - startedAt) + ' ms · 共 ' + total + ' ms';
+    }
+    statusEl.textContent = summary;
   } catch (err) {
     if (err.name === 'AbortError') {
-      statusEl.textContent =
-        '已停止生成（已收到 ' + replyText.length + ' 字）';
+      statusEl.textContent = '已停止生成（思考 ' + out.reasoning.length + ' 字，正文 ' +
+        out.content.length + ' 字）';
     } else {
-      replyEl.textContent += '\n[出错] ' + err;
+      reply.content.textContent += '\n[出错] ' + err;
       statusEl.textContent = '';
     }
   } finally {
-    replyEl.classList.remove('msg__body--typing');
+    reply.content.classList.remove('msg__content--typing');
     controller = null;
     setGenerating(false);
     inputEl.focus();
@@ -177,7 +233,7 @@ async function send() {
 sendEl.addEventListener('click', send);
 
 stopEl.addEventListener('click', () => {
-  // 中断 fetch，服务端会因此写失败而提前结束本轮响应
+  // 中断 fetch，服务端会因此写失败，进而中断对上游模型的请求
   if (controller) {
     controller.abort();
   }

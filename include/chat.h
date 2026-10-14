@@ -30,10 +30,16 @@ struct ChatRequest {
 // 从 HTTP 请求体（JSON 字符串）解析出 ChatRequest
 ChatRequest parse_chat_request(const std::string& body);
 
-// 内容生成的回调类型：收到一个"字"返回 true 表示继续，返回 false 表示客户端已断开
-using DeltaSink = std::function<bool(const std::string&)>;
+// 流式内容的类型：推理模型会先输出一段思考过程，再输出正式回答
+enum class DeltaKind {
+    Reasoning,  // 思考过程，对应上游的 reasoning_content 字段
+    Content     // 正式回答，对应上游的 content 字段
+};
 
-// 逐字产出回复内容：当前是服务端写死的假文字，后续替换为真实模型的流式调用
+// 内容生成的回调类型：收到一个"字"返回 true 表示继续，返回 false 表示客户端已断开
+using DeltaSink = std::function<bool(DeltaKind kind, const std::string& text)>;
+
+// 调用大模型接口，把流式返回的内容逐字回调出去
 bool generate_deltas(const std::string& prompt, const DeltaSink& on_delta);
 
 // 在 HTTP 服务上注册聊天相关路由

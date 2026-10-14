@@ -28,9 +28,13 @@ file(GLOB SOURCES "src/*.cpp")
 # 声明编译目标
 add_executable(ai_chat ${SOURCES})
 
-# cpp-httplib 依赖系统线程库
+# 启用 cpp-httplib 的 TLS 支持，用于以 HTTPS 访问大模型接口
+add_compile_definitions(CPPHTTPLIB_OPENSSL_SUPPORT)
+find_package(OpenSSL REQUIRED)
+
+# cpp-httplib 依赖系统线程库，TLS 依赖 OpenSSL 的 SSL 与 Crypto 组件
 find_package(Threads REQUIRED)
-target_link_libraries(ai_chat Threads::Threads)
+target_link_libraries(ai_chat Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
 
 # 规范化输出路径：可执行文件统一输出到项目根目录的 bin/ 下
 set_target_properties(ai_chat PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
