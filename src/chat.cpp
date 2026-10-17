@@ -219,11 +219,20 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
         msg.content = kFiltered;
     }
 
-    // 第二步：token 计算。统计本轮输入，当前是本地近似值，只打印到日志
-    TokenResult tokens = count_tokens(chat_req.messages.back().content);
+    // 第二步：token 估算。模型来自实测拟合，平均误差约 1 token；
+    // 但它终究只是估算——精确值只有上游返回的 usage 才有
+    std::vector<std::string> contents;
+    contents.reserve(chat_req.messages.size());
+    for (const Message& message : chat_req.messages) {
+        contents.push_back(message.content);
+    }
+    TokenResult input_estimate = count_tokens(chat_req.messages.back().content);
+    TokenResult prompt_estimate = estimate_conversation(contents);
+
     std::cout << "[ai-chat] 收到请求 model=" << chat_req.model
-              << " 本轮输入 token 估算=" << tokens.num_tokens
-              << "，共 " << chat_req.messages.size() << " 条消息" << std::endl;
+              << " 本轮输入估算=" << input_estimate.num_tokens
+              << "，整段 prompt 估算=" << prompt_estimate.num_tokens
+              << "（" << chat_req.messages.size() << " 条消息）" << std::endl;
 
     // 关闭各级缓冲，否则客户端要等全部内容生成完才能看到数据
     res.set_header("Cache-Control", "no-cache");
@@ -232,8 +241,8 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
     // 注意：此处不能再调用 res.set_content()，那会写入 Content-Length 使响应退化为非流式
     res.set_chunked_content_provider(
         "text/event-stream",
-        [chat_req, estimated_input = tokens.num_tokens](size_t offset,
-                                                        httplib::DataSink& sink) -> bool {
+        [chat_req, estimated_prompt = prompt_estimate.num_tokens](
+            size_t offset, httplib::DataSink& sink) -> bool {
             // offset 是本连接上已写出的字节数；非 0 说明是重复回调，本 provider 只跑一轮
             if (offset > 0) {
                 return false;
@@ -269,10 +278,11 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
                 std::string usage_line = make_usage_line(usage);
                 sink.write(usage_line.data(), usage_line.size());
                 std::cout << "[ai-chat] 上游真实用量 输入=" << usage.prompt_tokens
+                          << "（估算 " << estimated_prompt << "，误差 "
+                          << (estimated_prompt - usage.prompt_tokens) << "）"
                           << " 输出=" << usage.completion_tokens
                           << "（其中思考 " << usage.reasoning_tokens << "）"
-                          << " 合计=" << usage.total_tokens
-                          << " ｜本地估算输入=" << estimated_input << std::endl;
+                          << " 合计=" << usage.total_tokens << std::endl;
             }
 
             std::string done = "data: [DONE]\n\n";
