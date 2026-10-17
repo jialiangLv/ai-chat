@@ -26,6 +26,10 @@ const tabLoginEl = document.getElementById('tab-login');
 const tabRegisterEl = document.getElementById('tab-register');
 const userInfoEl = document.getElementById('user-info');
 const logoutEl = document.getElementById('logout');
+const usageToggleEl = document.getElementById('usage-toggle');
+const usagePanelEl = document.getElementById('usage');
+const usageTodayEl = document.getElementById('usage-today');
+const usageMonthEl = document.getElementById('usage-month');
 const sentBlockEl = document.getElementById('sent-block');
 const sentTitleEl = document.getElementById('sent-title');
 const sentTextEl = document.getElementById('sent-text');
@@ -520,6 +524,13 @@ async function send() {
         statusEl.textContent = '413 请求体过大';
         return;
       }
+      if (resp.status === 429) {
+        const retry = resp.headers.get('Retry-After');
+        reply.content.textContent = '请求太频繁，请' +
+          (retry ? ' ' + retry + ' 秒后' : '稍后') + '再试。';
+        statusEl.textContent = '429 请求过频';
+        return;
+      }
       reply.content.textContent = '请求失败：HTTP ' + resp.status;
       statusEl.textContent = '';
       return;
@@ -591,6 +602,9 @@ async function send() {
       authSession.quota = Math.max(0, authSession.quota - out.usage.total_tokens);
       saveAuthSession(authSession);
       renderUserInfo();
+      if (!usagePanelEl.hidden) {
+        loadUsage();  // 面板开着就顺手刷新
+      }
     }
 
     const total = Date.now() - startedAt;
@@ -623,6 +637,13 @@ sendEl.addEventListener('click', send);
 
 payloadToggleEl.addEventListener('click', () => {
   payloadEl.hidden = !payloadEl.hidden;
+});
+
+usageToggleEl.addEventListener('click', () => {
+  usagePanelEl.hidden = !usagePanelEl.hidden;
+  if (!usagePanelEl.hidden) {
+    loadUsage();
+  }
 });
 
 /* ---------- 登录 / 注册 ---------- */
@@ -666,6 +687,32 @@ async function refreshQuota() {
     renderUserInfo();
   } catch (e) {
     // 刷新失败不打扰用户
+  }
+}
+
+// 把一条统计格式化成一行文字
+function formatStats(s) {
+  return s.requests + ' 次请求 · 输入 ' + s.prompt +
+         ' · 输出 ' + s.completion + ' · 合计 ' + s.total + ' token';
+}
+
+// 拉取今日 / 本月用量
+async function loadUsage() {
+  if (!authSession) {
+    return;
+  }
+  try {
+    const resp = await fetch('/api/usage', {
+      headers: { 'Authorization': 'Bearer ' + authSession.token }
+    });
+    if (!resp.ok) {
+      return;
+    }
+    const data = await resp.json();
+    usageTodayEl.textContent = formatStats(data.today);
+    usageMonthEl.textContent = formatStats(data.month);
+  } catch (e) {
+    // 失败就保持上一次的数字
   }
 }
 

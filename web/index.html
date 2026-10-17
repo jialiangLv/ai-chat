@@ -20,10 +20,17 @@
     <div class="topbar__actions">
       <span class="topbar__status" id="status"></span>
       <button id="payload-toggle" class="topbar__toggle" type="button">请求体</button>
+      <button id="usage-toggle" class="topbar__toggle" type="button">用量</button>
       <span class="topbar__user" id="user-info"></span>
       <button id="logout" class="topbar__toggle" type="button">退出</button>
     </div>
   </header>
+
+  <!-- 用量面板：今日与本月，数据来自 /api/usage -->
+  <section class="usage" id="usage" hidden>
+    <div class="usage__row"><span>今日</span><span id="usage-today">—</span></div>
+    <div class="usage__row"><span>本月</span><span id="usage-month">—</span></div>
+  </section>
 
   <!-- 请求体面板：分两块显示，因为「本次发出的请求」和「累积的上下文」不是一回事 -->
   <section class="payload" id="payload" hidden>

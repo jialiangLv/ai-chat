@@ -184,6 +184,30 @@ body {
   font-size: 13px;
 }
 
+/* ---------- 用量面板 ---------- */
+
+.usage {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 10px 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.usage__row {
+  display: flex;
+  gap: 12px;
+}
+
+.usage__row > span:first-child {
+  flex: 0 0 40px;
+  font-weight: 600;
+}
+
 /* ---------- 登录 / 注册遮罩 ---------- */
 
 .auth {

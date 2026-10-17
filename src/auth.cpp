@@ -157,9 +157,13 @@ bool init_schema(Db& db, std::string& error) {
         "  user_id INTEGER NOT NULL REFERENCES users(id),"
         "  expires_at INTEGER NOT NULL"
         ")";
+    // 给「删除过期会话」准备的索引
+    const std::string sessions_index_sql =
+        "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)";
 
     return db.exec(users_sql, {}, error) >= 0 &&
-           db.exec(sessions_sql, {}, error) >= 0;
+           db.exec(sessions_sql, {}, error) >= 0 &&
+           db.exec(sessions_index_sql, {}, error) >= 0;
 }
 
 // 创建用户
@@ -211,6 +215,13 @@ bool check_credentials(Db& db, const std::string& username, const std::string& p
 // 创建会话
 bool create_session(Db& db, long user_id, long ttl_seconds, std::string& token,
                     std::string& error) {
+    // 顺手清掉已过期的会话。放在登录时做，不需要后台线程：
+    // 过期行只在「有新登录」时才可能堆积，表因此自我平衡。
+    // 清理失败不影响登录，所以错误单独用一个变量接住
+    std::string ignored;
+    db.exec("DELETE FROM sessions WHERE expires_at < ?",
+            {std::to_string(static_cast<long long>(std::time(nullptr)))}, ignored);
+
     token = make_session_token();
     if (token.empty()) {
         error = "生成令牌失败";

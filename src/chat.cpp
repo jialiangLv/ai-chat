@@ -13,11 +13,15 @@
 #include "chat.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "ac_automaton.h"
@@ -25,6 +29,7 @@
 #include "db.h"
 #include "json.hpp"
 #include "tokenizer.h"
+#include "usage.h"
 
 namespace {
 
@@ -91,6 +96,47 @@ std::string join_names(const std::vector<std::string>& items) {
     }
     return out;
 }
+
+// 按用户的令牌桶限流。
+// 状态只放内存：单进程下它就是全局的；而且限流的目的是保护服务，
+// 不该反过来给数据库加压。代价是重启后桶清空，可以接受
+class RateLimiter {
+public:
+    // 放行返回 true；不放行时 wait_seconds 给出建议等待的秒数
+    bool allow(long user_id, double rate_per_sec, double burst, double& wait_seconds) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto now = std::chrono::steady_clock::now();
+
+        Bucket& bucket = buckets_[user_id];
+        if (!bucket.initialized) {
+            bucket.tokens = burst;
+            bucket.updated = now;
+            bucket.initialized = true;
+        }
+
+        // 按流逝的时间补充令牌，最多补到 burst
+        const double elapsed = std::chrono::duration<double>(now - bucket.updated).count();
+        bucket.tokens = std::min(burst, bucket.tokens + elapsed * rate_per_sec);
+        bucket.updated = now;
+
+        if (bucket.tokens < 1.0) {
+            wait_seconds = (rate_per_sec > 0) ? (1.0 - bucket.tokens) / rate_per_sec : 1.0;
+            return false;
+        }
+        bucket.tokens -= 1.0;
+        return true;
+    }
+
+private:
+    struct Bucket {
+        bool initialized = false;
+        double tokens = 0;
+        std::chrono::steady_clock::time_point updated;
+    };
+
+    std::mutex mutex_;
+    std::unordered_map<long, Bucket> buckets_;
+};
 
 // 从 Authorization: Bearer <token> 里取出令牌；没有或格式不对返回空串
 std::string bearer_token(const httplib::Request& req) {
@@ -393,6 +439,11 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
                 if (!deduct_quota(db, user.id, usage.total_tokens, deduct_error)) {
                     std::cout << "[ai-chat] 扣减额度失败：" << deduct_error << std::endl;
                 }
+
+                // 记一行明细。尽力而为：写失败只打日志，不影响已经扣掉的额度
+                record_usage(db, user.id, model, usage.prompt_tokens,
+                             usage.completion_tokens, usage.reasoning_tokens,
+                             usage.total_tokens);
 
                 std::cout << "[ai-chat] 上游真实用量 输入=" << usage.prompt_tokens
                           << "（估算 " << estimated_prompt << "，误差 "
@@ -701,18 +752,50 @@ void handle_me(const httplib::Request&, httplib::Response& res, Db& db) {
     res.set_content(out.dump(), "application/json");
 }
 
+// 用量统计：今日与本月
+void handle_usage(const httplib::Request&, httplib::Response& res, Db& db) {
+    set_cors_headers(res);
+
+    UsageStats today;
+    UsageStats month;
+    std::string error;
+    if (!query_usage(db, g_current_user.id, start_of_today(), today, error) ||
+        !query_usage(db, g_current_user.id, start_of_month(), month, error)) {
+        send_error(res, 500, "统计失败");
+        return;
+    }
+
+    auto to_json = [](const UsageStats& s) {
+        nlohmann::json j;
+        j["requests"] = s.requests;
+        j["prompt"] = s.prompt_tokens;
+        j["completion"] = s.completion_tokens;
+        j["total"] = s.total_tokens;
+        return j;
+    };
+
+    nlohmann::json out;
+    out["today"] = to_json(today);
+    out["month"] = to_json(month);
+    res.set_content(out.dump(), "application/json");
+}
+
 // 在 HTTP 服务上注册所有路由
 void register_chat_routes(httplib::Server& server, Db& db) {
+    // 限流器要活到服务结束，所以用 shared_ptr 按值捕获，避免悬垂引用
+    auto limiter = std::make_shared<RateLimiter>();
+
     // 鉴权中间件：在路由分发之前执行，一个地方管住所有需要登录的接口
     server.set_pre_routing_handler(
-        [&db](const httplib::Request& req, httplib::Response& res) {
+        [&db, limiter](const httplib::Request& req, httplib::Response& res) {
             // 每个请求都先清空，保证不会读到上一个请求残留的身份
             g_current_user = AuthUser{};
 
-            // 需要登录的路径：聊天接口和「我的信息」。
+            // 需要登录的路径：聊天接口、我的信息、用量统计。
             // 注册/登录不在此列——它们本来就是用来换取身份的
-            const bool guarded =
-                req.path.rfind("/v1/", 0) == 0 || req.path == "/api/me";
+            const bool guarded = req.path.rfind("/v1/", 0) == 0 ||
+                                 req.path == "/api/me" ||
+                                 req.path == "/api/usage";
 
             // 静态文件与 OPTIONS 预检必须放行：页面本身不是秘密；
             // 浏览器按规范不会在预检里带 Authorization，拦了跨域全废
@@ -721,17 +804,38 @@ void register_chat_routes(httplib::Server& server, Db& db) {
             }
 
             g_current_user = authenticate(db, bearer_token(req));
-            if (g_current_user.ok) {
-                return httplib::Server::HandlerResponse::Unhandled;
+            if (!g_current_user.ok) {
+                set_cors_headers(res);
+                res.status = 401;
+                res.set_header("WWW-Authenticate", "Bearer");
+                nlohmann::json err;
+                err["error"] = "未授权：请先登录";
+                res.set_content(err.dump(), "application/json");
+                return httplib::Server::HandlerResponse::Handled;  // 已应答，跳过路由
             }
 
-            set_cors_headers(res);
-            res.status = 401;
-            res.set_header("WWW-Authenticate", "Bearer");
-            nlohmann::json err;
-            err["error"] = "未授权：请先登录";
-            res.set_content(err.dump(), "application/json");
-            return httplib::Server::HandlerResponse::Handled;  // 已应答，跳过路由
+            // 只对聊天接口按用户限流。现在有身份了，不必再按 IP 误伤共享出口
+            if (req.path.rfind("/v1/", 0) == 0) {
+                const double per_minute =
+                    static_cast<double>(get_env_long("RATE_LIMIT_PER_MINUTE", 20));
+                const double burst =
+                    static_cast<double>(get_env_long("RATE_LIMIT_BURST", 10));
+
+                double wait_seconds = 0;
+                if (!limiter->allow(g_current_user.id, per_minute / 60.0, burst,
+                                    wait_seconds)) {
+                    const int retry_after = std::max(1, static_cast<int>(std::ceil(wait_seconds)));
+                    set_cors_headers(res);
+                    res.status = 429;
+                    res.set_header("Retry-After", std::to_string(retry_after));
+                    nlohmann::json err;
+                    err["error"] = "请求太频繁，请稍后再试";
+                    res.set_content(err.dump(), "application/json");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
+            }
+
+            return httplib::Server::HandlerResponse::Unhandled;
         });
 
     // 敏感词表在启动时加载并构建一次，之后所有请求共用同一份自动机
@@ -755,6 +859,7 @@ void register_chat_routes(httplib::Server& server, Db& db) {
     server.Options("/api/register", preflight);
     server.Options("/api/login", preflight);
     server.Options("/api/me", preflight);
+    server.Options("/api/usage", preflight);
 
     server.Post("/v1/chat/completions",
                 [sensitive, &db](const httplib::Request& req, httplib::Response& res) {
@@ -771,5 +876,8 @@ void register_chat_routes(httplib::Server& server, Db& db) {
                 });
     server.Get("/api/me", [&db](const httplib::Request& req, httplib::Response& res) {
         handle_me(req, res, db);
+    });
+    server.Get("/api/usage", [&db](const httplib::Request& req, httplib::Response& res) {
+        handle_usage(req, res, db);
     });
 }

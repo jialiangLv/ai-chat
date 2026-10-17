@@ -20,6 +20,7 @@ include/
   ac_automaton.h      AC 自动机接口（多模式串匹配）
   db.h                SQLite 极简封装（一个连接 + 一把互斥锁）
   auth.h              用户与会话：密码哈希、会话令牌、配额
+  usage.h             用量明细与统计
 src/
   main.cpp            进程骨架：读 .env、开库建表、注册路由、托管前端、启动服务
   chat.cpp            一次对话的全部处理：解析请求体、敏感词检查、调模型、写 SSE 流
@@ -27,6 +28,7 @@ src/
   ac_automaton.cpp    AC 自动机的实现
   db.cpp              SQLite 封装的实现
   auth.cpp            PBKDF2 密码哈希、会话令牌、配额的原子扣减
+  usage.cpp           用量明细的写入与 SUM 聚合
 web/
   index.html          前端结构
   app.css             前端样式（仿 ChatGPT 的浅色界面）
@@ -72,6 +74,10 @@ SESSION_TTL_SECONDS=604800
 # SQLite 数据库文件路径
 DB_PATH=./data/ai_chat.db
 
+# 按用户的请求限流：每分钟补充多少个令牌、最多攒多少个
+RATE_LIMIT_PER_MINUTE=20
+RATE_LIMIT_BURST=10
+
 # 单次请求的 prompt 估算上限，超过就拒绝、不调用模型
 MAX_PROMPT_TOKENS=32000
 
@@ -104,6 +110,8 @@ DEEPSEEK_MODEL=deepseek-v4-pro ./bin/ai_chat
 | `INITIAL_QUOTA` | `100000` | 新用户的初始额度（token 数） |
 | `SESSION_TTL_SECONDS` | `604800` | 登录会话有效期（7 天） |
 | `DB_PATH` | `./data/ai_chat.db` | SQLite 数据库文件路径 |
+| `RATE_LIMIT_PER_MINUTE` | `20` | 每个用户每分钟可发的聊天请求数 |
+| `RATE_LIMIT_BURST` | `10` | 允许的瞬时突发次数 |
 
 ## 敏感词过滤
 
@@ -290,6 +298,46 @@ sessions(token PRIMARY KEY, user_id, expires_at)
 | `GET` | `/api/me` | 需要令牌，返回 `{username, quota}` |
 | `POST` | `/v1/chat/completions` | 需要令牌 |
 
+## 用量明细、限流与会话清理
+
+### 用量明细
+
+每次请求结束后往 `usage_log` 表记一行（用户、模型、输入/输出/思考/合计 token、时间），
+统计用 SQL 的 `SUM` 直接聚合：
+
+```
+GET /api/usage   （需要登录）
+→ { "today": {"requests":2,"prompt":66,"completion":202,"total":268}, "month": {...} }
+```
+
+网页顶栏的「用量」按钮会显示今日与本月。
+
+**写入是尽力而为的**：写日志失败只打一条日志，不影响已经扣掉的额度和本次请求。
+扣减与写日志是两条独立语句、**不是原子的**——但额度才是权威数据，日志丢了只是少一条统计。
+
+### 限流（按用户）
+
+现在有身份了，不必再按 IP 限——按 IP 会误伤共享出口 IP 的场景。
+
+- **按用户的令牌桶**，状态只放内存（单进程下即全局；限流的目的是保护服务，不该反过来给数据库加压）
+- 只作用于 `/v1/` 聊天接口，`RATE_LIMIT_PER_MINUTE` 控制长期速度，`RATE_LIMIT_BURST` 允许突发
+- 超限返回 `429` + `Retry-After: <秒>`，前端会提示"请求太频繁"
+- 重启后桶清空——可以接受
+
+**注意**：`/api/login` 和 `/api/register` **还没有限流**。它们没有身份可用，只能按 IP 限，
+而这个缺口意味着**密码可以被在线爆破**——这是接下来该补的。
+
+### 过期会话清理
+
+`sessions` 表只增不减会慢慢变大。做法是在**每次登录时顺手删掉已过期的行**：
+
+```sql
+DELETE FROM sessions WHERE expires_at < ?
+```
+
+不需要后台线程：过期行只在「有新登录」时才可能堆积，表因此自我平衡。
+`expires_at` 上建了索引，删除不会全表扫描。
+
 ## 多会话与本地持久化
 
 侧边栏可以新建、切换、删除会话；全部会话存在浏览器 localStorage 里，**服务端依旧
@@ -395,8 +443,7 @@ curl -s -D - -o /dev/null -N -X POST http://127.0.0.1:8080/v1/chat/completions \
 
 ## 后续迭代方向
 
-1. 用量明细（额度扣了，但没有逐次记录，看不到"钱花在哪了"）
-2. 限流（现在有身份了，可以按用户限，不必再按 IP 误伤共享出口）
-3. 过期会话清理（`sessions` 表只增不减，需要定期删过期行）
-4. 会话的导入导出（目前只在本机浏览器里，换设备就没了）
-5. 思考过程的 Markdown 渲染（目前只有正文渲染，思考区是纯文本）
+1. **登录/注册接口限流**——目前完全不限，密码可以被在线爆破；这类接口没有身份可用，只能按 IP 限
+2. 用量日志的保留策略（`usage_log` 只增不减，数据量大了要考虑归档或清理）
+3. 会话的导入导出（目前只在本机浏览器里，换设备就没了）
+4. 思考过程的 Markdown 渲染（目前只有正文渲染，思考区是纯文本）

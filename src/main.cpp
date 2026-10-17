@@ -21,6 +21,7 @@
 #include "chat.h"
 #include "db.h"
 #include "httplib.h"
+#include "usage.h"
 
 // 读取环境变量，若未设置则返回预设的默认值
 std::string get_env_var(const char* key, const std::string& default_val) {
@@ -92,6 +93,10 @@ int main() {
     }
     if (!init_schema(db, db_error)) {
         std::cerr << "[ai-chat] 建表失败：" << db_error << std::endl;
+        return 1;
+    }
+    if (!init_usage_schema(db, db_error)) {
+        std::cerr << "[ai-chat] 建用量表失败：" << db_error << std::endl;
         return 1;
     }
     std::cout << "[ai-chat] 用户数据库：" << db_path << std::endl;
