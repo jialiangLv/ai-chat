@@ -156,8 +156,14 @@ body {
   font-size: 13px;
 }
 
-.topbar__toggle {
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-left: auto;
+}
+
+.topbar__toggle {
   padding: 4px 12px;
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -171,6 +177,48 @@ body {
 .topbar__toggle:hover {
   border-color: #c9c9c9;
   color: var(--text);
+}
+
+/* ---------- 令牌栏 ---------- */
+
+.token-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: #fafafa;
+}
+
+.token-bar__input {
+  flex: 1 1 auto;
+  max-width: 420px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
+.token-bar__save {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.token-bar__save:hover {
+  border-color: #c9c9c9;
+}
+
+.token-bar__hint {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 /* ---------- 请求体面板 ---------- */

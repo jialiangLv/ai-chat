@@ -16,6 +16,11 @@ const payloadEl = document.getElementById('payload');
 const payloadToggleEl = document.getElementById('payload-toggle');
 const sessionListEl = document.getElementById('session-list');
 const newSessionEl = document.getElementById('new-session');
+const tokenBarEl = document.getElementById('token-bar');
+const tokenToggleEl = document.getElementById('token-toggle');
+const tokenInputEl = document.getElementById('token-input');
+const tokenSaveEl = document.getElementById('token-save');
+const tokenHintEl = document.getElementById('token-hint');
 const sentBlockEl = document.getElementById('sent-block');
 const sentTitleEl = document.getElementById('sent-title');
 const sentTextEl = document.getElementById('sent-text');
@@ -29,6 +34,14 @@ let controller = null;
    会话只存在浏览器本地，服务端依旧无状态。storage key 带版本号：
    将来数据结构变了就换成 v2，旧数据自然失效——不用写迁移，也不会读到旧结构而崩 */
 const STORAGE_KEY = 'ai-chat.v1';
+
+// 访问令牌单独存一个键：它属于"本机配置"，不跟着会话走
+const TOKEN_STORAGE_KEY = 'ai-chat.token';
+
+// 读取浏览器里存的访问令牌
+function getToken() {
+  return localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+}
 
 // 发给模型的上下文最多带多少条，与服务端的截断上限保持一致
 const MAX_CONTEXT_MESSAGES = 20;
@@ -440,14 +453,29 @@ async function send() {
     };
     showRequestPayload(requestBody);
 
+    // 令牌放在请求头里，不出现在请求体中——所以请求体面板里也看不到它
+    const headers = { 'Content-Type': 'application/json' };
+    const token = getToken();
+    if (token) {
+      headers['Authorization'] = 'Bearer ' + token;
+    }
+
     const resp = await fetch('/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers,
       body: JSON.stringify(requestBody),
       signal: controller.signal
     });
 
     if (!resp.ok) {
+      // 401 要明确说出来并且把令牌栏翻出来，否则表现是"点了发送什么都没发生"
+      if (resp.status === 401) {
+        reply.content.textContent = '未授权：令牌未填写或无效，请点右上角「令牌」设置。';
+        statusEl.textContent = '401 未授权';
+        tokenBarEl.hidden = false;
+        tokenInputEl.focus();
+        return;
+      }
       reply.content.textContent = '请求失败：HTTP ' + resp.status;
       statusEl.textContent = '';
       return;
@@ -546,6 +574,26 @@ payloadToggleEl.addEventListener('click', () => {
   payloadEl.hidden = !payloadEl.hidden;
 });
 
+tokenToggleEl.addEventListener('click', () => {
+  tokenBarEl.hidden = !tokenBarEl.hidden;
+  if (!tokenBarEl.hidden) {
+    tokenInputEl.focus();
+  }
+});
+
+tokenSaveEl.addEventListener('click', () => {
+  const token = tokenInputEl.value.trim();
+  if (!token) {
+    tokenHintEl.textContent = '令牌不能为空';
+    return;
+  }
+  localStorage.setItem(TOKEN_STORAGE_KEY, token);
+  tokenHintEl.textContent = '已保存';
+  setTimeout(() => {
+    tokenHintEl.textContent = '保存在本浏览器，每次请求通过 Authorization 头发送';
+  }, 1500);
+});
+
 // 代码块的「复制」按钮是渲染出来的，且流式期间会被反复重建，
 // 所以用事件委托统一处理，而不是每次渲染都去绑定
 chatEl.addEventListener('click', (e) => {
@@ -589,11 +637,19 @@ inputEl.addEventListener('keydown', (e) => {
 
 newSessionEl.addEventListener('click', newSession);
 
+// 把已保存的令牌回填到输入框
+tokenInputEl.value = getToken();
+
 // 启动：能恢复本地会话就恢复，否则开一个新的空会话
 if (loadSessions()) {
   renderSessionList();
   renderSession();
 } else {
   newSession();
+}
+
+// 还没设过令牌就先把令牌栏打开，否则第一次发消息只会得到 401，用户不知道要做什么
+if (!getToken()) {
+  tokenBarEl.hidden = false;
 }
 inputEl.focus();

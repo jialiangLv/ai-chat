@@ -64,6 +64,14 @@ int main() {
     // 先把 .env 里的配置读进环境，后续统一用 get_env_var 取值
     load_dotenv(".env");
 
+    // fail-closed：令牌没配就拒绝启动。
+    // 若设计成"没配就放行"，一次配置疏漏会静默退化成完全无鉴权，且收不到任何信号
+    if (get_env_var("AI_CHAT_TOKEN", "").empty()) {
+        std::cerr << "[ai-chat] 未配置 AI_CHAT_TOKEN，拒绝启动。" << std::endl
+                  << "         请在 .env 中设置一个足够长的随机字符串。" << std::endl;
+        return 1;
+    }
+
     int port = std::stoi(get_env_var("PORT", "8080"));
     std::string web_root = get_env_var("WEB_ROOT", "./web");
 

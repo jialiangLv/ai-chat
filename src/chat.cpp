@@ -32,6 +32,32 @@ std::string get_env(const char* key, const std::string& default_val = "") {
     return (val && *val) ? std::string(val) : default_val;
 }
 
+// 恒定时间比较：不因首个不同的字节就提前返回，避免通过响应耗时逐字节猜出令牌
+// 长度不同直接返回 false——长度本身不算秘密
+bool secure_equals(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+    }
+    return diff == 0;
+}
+
+// 从 Authorization: Bearer <token> 里取出令牌并与期望值比对
+bool token_matches(const httplib::Request& req, const std::string& expected) {
+    if (!req.has_header("Authorization")) {
+        return false;
+    }
+    const std::string value = req.get_header_value("Authorization");
+    const std::string prefix = "Bearer ";
+    if (value.compare(0, prefix.size(), prefix) != 0) {
+        return false;
+    }
+    return secure_equals(value.substr(prefix.size()), expected);
+}
+
 // 敏感词拦截时回给前端的标记响应头，前端据此决定这一轮要不要计入上下文
 constexpr const char* kBlockedHeader = "X-Ai-Chat-Blocked";
 
@@ -440,6 +466,34 @@ bool generate_deltas(const std::vector<Message>& messages, const DeltaSink& on_d
 
 // 在 HTTP 服务上注册聊天相关路由
 void register_chat_routes(httplib::Server& server) {
+    // 访问令牌启动时读一次；main() 已保证它非空（fail-closed）
+    const std::string token = get_env("AI_CHAT_TOKEN");
+
+    // 鉴权中间件：在路由分发之前执行，一个地方管住所有接口。
+    // 只守 /v1/ 前缀——原因见下面两行注释
+    server.set_pre_routing_handler(
+        [token](const httplib::Request& req, httplib::Response& res) {
+            const bool is_api = req.path.rfind("/v1/", 0) == 0;
+
+            // 静态文件必须放行：页面本身不是秘密，若连页面都要令牌，
+            // 用户连输入令牌的界面都看不到
+            // OPTIONS 预检必须放行：浏览器按规范不会在预检里带 Authorization
+            if (!is_api || req.method == "OPTIONS") {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+            if (token_matches(req, token)) {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+
+            set_cors_headers(res);
+            res.status = 401;
+            res.set_header("WWW-Authenticate", "Bearer");
+            nlohmann::json err;
+            err["error"] = "未授权：缺少或错误的访问令牌";
+            res.set_content(err.dump(), "application/json");
+            return httplib::Server::HandlerResponse::Handled;  // 已应答，跳过路由
+        });
+
     // 敏感词表在启动时加载并构建一次，之后所有请求共用同一份自动机
     auto sensitive = std::make_shared<AcAutomaton>();
     std::string dict_path = get_env("SENSITIVE_DICT", "dict/sensitive.txt");
