@@ -11,11 +11,15 @@
  */
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <system_error>
 
+#include "auth.h"
 #include "chat.h"
+#include "db.h"
 #include "httplib.h"
 
 // 读取环境变量，若未设置则返回预设的默认值
@@ -64,14 +68,6 @@ int main() {
     // 先把 .env 里的配置读进环境，后续统一用 get_env_var 取值
     load_dotenv(".env");
 
-    // fail-closed：令牌没配就拒绝启动。
-    // 若设计成"没配就放行"，一次配置疏漏会静默退化成完全无鉴权，且收不到任何信号
-    if (get_env_var("AI_CHAT_TOKEN", "").empty()) {
-        std::cerr << "[ai-chat] 未配置 AI_CHAT_TOKEN，拒绝启动。" << std::endl
-                  << "         请在 .env 中设置一个足够长的随机字符串。" << std::endl;
-        return 1;
-    }
-
     int port = std::stoi(get_env_var("PORT", "8080"));
     std::string web_root = get_env_var("WEB_ROOT", "./web");
 
@@ -81,8 +77,27 @@ int main() {
     // 这和 token 估算无关，纯粹是 HTTP 层的防护，超限时返回 413
     server.set_payload_max_length(1024 * 1024);  // 1 MB
 
-    // 注册聊天相关路由（POST /v1/chat/completions）
-    register_chat_routes(server);
+    // 打开用户数据库（不存在就创建），并建表。数据库放本机文件里，
+    // 不需要额外的数据库服务
+    const std::string db_path = get_env_var("DB_PATH", "./data/ai_chat.db");
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(db_path).parent_path(), ec);
+
+    Db db;
+    std::string db_error;
+    if (!db.open(db_path, db_error)) {
+        std::cerr << "[ai-chat] 打开数据库失败：" << db_error << "（" << db_path << "）"
+                  << std::endl;
+        return 1;
+    }
+    if (!init_schema(db, db_error)) {
+        std::cerr << "[ai-chat] 建表失败：" << db_error << std::endl;
+        return 1;
+    }
+    std::cout << "[ai-chat] 用户数据库：" << db_path << std::endl;
+
+    // 注册所有路由（聊天 / 注册 / 登录 / 我的信息）
+    register_chat_routes(server, db);
 
     // 把前端页面目录托管为静态站点，访问 / 时自动返回 index.html
     if (!server.set_mount_point("/", web_root)) {

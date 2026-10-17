@@ -18,11 +18,15 @@ include/
   chat.h              聊天模块接口：请求结构体、解析、内容生成、路由注册
   tokenizer.h         token 计数接口
   ac_automaton.h      AC 自动机接口（多模式串匹配）
+  db.h                SQLite 极简封装（一个连接 + 一把互斥锁）
+  auth.h              用户与会话：密码哈希、会话令牌、配额
 src/
-  main.cpp            进程骨架：读 .env、注册路由、托管前端、启动服务
+  main.cpp            进程骨架：读 .env、开库建表、注册路由、托管前端、启动服务
   chat.cpp            一次对话的全部处理：解析请求体、敏感词检查、调模型、写 SSE 流
   tokenizer.cpp       按特征加权的 token 估算（系数来自实测拟合）
   ac_automaton.cpp    AC 自动机的实现
+  db.cpp              SQLite 封装的实现
+  auth.cpp            PBKDF2 密码哈希、会话令牌、配额的原子扣减
 web/
   index.html          前端结构
   app.css             前端样式（仿 ChatGPT 的浅色界面）
@@ -56,11 +60,23 @@ DEEPSEEK_API_KEY=sk-...
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 DEEPSEEK_MODEL=deepseek-flash
 
-# 访问令牌：客户端请求 /v1/ 接口时必须带 Authorization: Bearer <此值>
-AI_CHAT_TOKEN=<一串足够长的随机字符>
+# 注册邀请码：调用 /api/register 时必须带它。改掉即可撤销
+REGISTER_CODE=<随机字符串>
+
+# 新用户的初始额度（token 数）
+INITIAL_QUOTA=100000
+
+# 登录会话有效期（秒）
+SESSION_TTL_SECONDS=604800
+
+# SQLite 数据库文件路径
+DB_PATH=./data/ai_chat.db
 
 # 单次请求的 prompt 估算上限，超过就拒绝、不调用模型
 MAX_PROMPT_TOKENS=32000
+
+# 允许客户端指定的模型名，逗号分隔。不配置时只允许 DEEPSEEK_MODEL 那一个
+ALLOWED_MODELS=deepseek-flash
 ```
 
 生成令牌：
@@ -83,6 +99,11 @@ DEEPSEEK_MODEL=deepseek-v4-pro ./bin/ai_chat
 | `WEB_ROOT` | `./web` | 前端静态文件目录 |
 | `SENSITIVE_DICT` | `dict/sensitive.txt` | 敏感词表路径 |
 | `MAX_PROMPT_TOKENS` | `32000` | prompt 估算上限，超过就拒绝（自我保护，不是模型上限） |
+| `ALLOWED_MODELS` | 空 | 允许客户端指定的模型名，逗号分隔；空表示只允许 `DEEPSEEK_MODEL` |
+| `REGISTER_CODE` | 空 | 注册邀请码；未配置则不开放注册 |
+| `INITIAL_QUOTA` | `100000` | 新用户的初始额度（token 数） |
+| `SESSION_TTL_SECONDS` | `604800` | 登录会话有效期（7 天） |
+| `DB_PATH` | `./data/ai_chat.db` | SQLite 数据库文件路径 |
 
 ## 敏感词过滤
 
@@ -205,45 +226,69 @@ DeepSeek 私有的，而 tiktoken 是 OpenAI 的分词器——用它算 DeepSee
 - 它永远只是估算。**精确值只有上游返回的 `usage` 才有**，而且它在事后
 - 所以它适合做「发送前的粗筛」，不能用于计费
 
-## 访问令牌
+## 多用户与登录
 
 服务监听 `0.0.0.0`，**同网段任何人都能访问**，而每次请求都会消耗 `.env` 里那把
-DeepSeek key 的额度。所以 `/v1/` 下的接口需要令牌：
+DeepSeek key 的额度。所以现在有了用户体系：
 
+- 注册需要**邀请码**（`REGISTER_CODE`）——否则任何人注册新号就能继续白嫖额度
+- 登录成功后服务端发放**随机会话令牌**，客户端每次请求带 `Authorization: Bearer <token>`
+- 每个用户有独立额度（`INITIAL_QUOTA`），请求结束后按上游返回的 `usage` **原子扣减**
+- 登录、注册、额度都在网页右上角和登录遮罩里完成
+
+### 数据怎么存
+
+用户与会话存在 **SQLite**（`DB_PATH`，默认 `./data/ai_chat.db`）。选它是因为：
+单文件、**有事务**、进程内并发安全、不需要额外的数据库服务。
+
+```sql
+users(id, username UNIQUE, password_hash, quota, created_at)
+sessions(token PRIMARY KEY, user_id, expires_at)
 ```
-POST /v1/chat/completions
-Authorization: Bearer <AI_CHAT_TOKEN>
-```
 
-在网页右上角点「令牌」填一次，存在浏览器本地，之后每次请求自动带上。
+- **密码用 PBKDF2-HMAC-SHA256 + 每用户随机盐**（12 万次迭代），存成
+  `pbkdf2$迭代次数$盐$哈希`。**绝不存明文**——参考项目就有这个毛病（列名叫
+  `password_hash`，插进去的却是明文）
+- **令牌是不透明随机串**，服务端只存令牌本身。好处是**可以单独撤销**（删一行），
+  不像 JWT 那样只能换密钥让全员掉线
 
-### 设计取舍
+### 几个关键设计
 
-- **只守 `/v1/` 前缀**。静态文件必须放行——否则用户连输入令牌的页面都看不到；
-  `OPTIONS` 预检也必须放行——浏览器按规范不会在预检里带 `Authorization`，拦了跨域全废
-- **挂在 `pre_routing_handler`**，而不是每个 handler 里各写一遍。将来新增接口默认就在门内，
-  漏加一个就是洞
-- **恒定时间比较**。普通 `==` 在第一个不同的字节就返回，理论上能靠响应耗时逐字节猜出令牌。
-  公网上的时间差基本测不出来，但这是正确习惯，成本只有几行
-- **fail-closed**。令牌没配就**拒绝启动**。如果设计成"没配就放行"，一次配置疏漏会静默
-  退化成完全无鉴权，而且收不到任何信号
-- **401 必须显式提示**。前端收到 401 会明确说出来并自动展开令牌栏，否则表现是
-  "点了发送什么都没发生"
+- **鉴权挂在 `pre_routing_handler` 上**，只守 `/v1/` 和 `/api/me`：
+  静态文件必须放行（否则连登录页都看不到），`OPTIONS` 预检也必须放行
+  （浏览器按规范不会在预检里带 `Authorization`，拦了跨域全废）
+- 中间件把身份写进 `thread_local`，供 handler 读取。之所以可行：httplib 的中间件和
+  handler 在**同一个工作线程顺序执行**，而且中间件对每个请求都会跑——只要它开头先清空，
+  就不会读到上一个请求的残留
+- **额度扣减是一条原子 SQL**：`UPDATE ... SET quota = quota - ? WHERE id = ? AND quota >= ?`，
+  看受影响行数判断成功与否。**不能**"先查再扣"，并发下会双花
+- **扣减发生在回答结束之后**（那时才有 `usage`），所以最后一个请求可能略微超额
+- 登录失败统一回「用户名或密码错误」，**不区分用户不存在还是密码错**，避免账号枚举
+- 前端按**用户名分键**存会话（`ai-chat.sessions.v1.<username>`），同一浏览器换账号
+  不会看到上一个人的对话
 
 ### 它挡不住什么
 
 | 挡不住 | 说明 |
 |---|---|
-| 拿到令牌的人 | 一人外传，人人可用；也没有单独吊销，只能给所有人换新的 |
-| 打满额度 | 有令牌的人仍可以疯狂发请求——**限流是它的天然搭档** |
-| 明文传输 | 局域网 HTTP 下，能嗅探流量的人可以抓走令牌 |
+| 拿到令牌的人 | 令牌就相当于登录态；丢了就是丢了 |
+| 打满额度 | 有额度的人仍可以疯狂发请求——**限流还没做** |
+| 明文传输 | 局域网 HTTP 下，能嗅探流量的人可以抓走令牌和密码 |
 
-它挡的是**同网段扫到端口的人、误访问、好奇点开的人**。如果要把服务暴露到公网，
-这还不够——那需要 HTTPS 和更严格的方案。
+如果要把服务暴露到公网，这还不够——那需要 HTTPS。
 
 另外要记住一条：**任何将来能触达模型的入口，都必须同样守门**。参考项目就栽在
 "正门有锁、后门没门"上——它的 chat-server 有完整的 JWT 和配额，但旁边的网关一行
 鉴权都没有，还监听所有网卡。
+
+### 接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/register` | `{username, password, code}` |
+| `POST` | `/api/login` | `{username, password}` → `{token, username, quota}` |
+| `GET` | `/api/me` | 需要令牌，返回 `{username, quota}` |
+| `POST` | `/v1/chat/completions` | 需要令牌 |
 
 ## 多会话与本地持久化
 
@@ -277,6 +322,24 @@ messages（实际发给模型）
   不用写迁移代码，也不会因为读到旧结构而崩
 - **提交时按 `sessionId` 而不是「当前会话」**。生成期间用户可能切走，回复必须落回发起
   它的那个会话，否则会写到错误的对话里
+
+## 模型白名单
+
+接口接受 OpenAI 风格的 `model` 字段，取值范围由 `ALLOWED_MODELS` 限定：
+
+- 不传 `model` → 用 `.env` 里的 `DEEPSEEK_MODEL`
+- 传了且在清单里 → 用它
+- 传了但不在清单里 → **400**，并列出可用模型
+
+回给客户端的每个 SSE 分片里，`"model"` 报告的是**实际用到的模型**，而不是硬编码的字符串。
+
+### 为什么要有清单
+
+- **成本**：不同模型价格可能差几倍，不能让调用方点名最贵的那个
+- **错误信息**：模型名拼错时，上游的错误往往埋在 SSE 里，很难定位；白名单能在本地就给出清楚的 400
+- **最容易被忽略的一条**：token 估算的系数是按具体模型拟合的（见上一节）。**白名单里的每个模型都必须单独测过系数**，否则长度检查会悄悄失准
+
+所以清单里目前只放 `deepseek-flash`——只有它是测过的。真要用别的模型时，先测一轮再加进去。
 
 ## 接口
 
@@ -332,9 +395,8 @@ curl -s -D - -o /dev/null -N -X POST http://127.0.0.1:8080/v1/chat/completions \
 
 ## 后续迭代方向
 
-1. 客户端传的 `model` 字段目前被静默忽略，实际用的始终是 `.env` 里的 `DEEPSEEK_MODEL`——
-   接口收下参数却不用它，应该改成白名单校验或干脆不接
-2. 用量记账（把每次的 `usage` 追加到 `logs/usage.jsonl`，再加个统计接口）
-3. 限流（目前只能按 IP 限，容易误伤共享出口 IP 的场景；按人限流要等有身份体系）
+1. 用量明细（额度扣了，但没有逐次记录，看不到"钱花在哪了"）
+2. 限流（现在有身份了，可以按用户限，不必再按 IP 误伤共享出口）
+3. 过期会话清理（`sessions` 表只增不减，需要定期删过期行）
 4. 会话的导入导出（目前只在本机浏览器里，换设备就没了）
 5. 思考过程的 Markdown 渲染（目前只有正文渲染，思考区是纯文本）

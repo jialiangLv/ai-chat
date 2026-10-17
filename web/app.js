@@ -16,11 +16,16 @@ const payloadEl = document.getElementById('payload');
 const payloadToggleEl = document.getElementById('payload-toggle');
 const sessionListEl = document.getElementById('session-list');
 const newSessionEl = document.getElementById('new-session');
-const tokenBarEl = document.getElementById('token-bar');
-const tokenToggleEl = document.getElementById('token-toggle');
-const tokenInputEl = document.getElementById('token-input');
-const tokenSaveEl = document.getElementById('token-save');
-const tokenHintEl = document.getElementById('token-hint');
+const authEl = document.getElementById('auth');
+const authUsernameEl = document.getElementById('auth-username');
+const authPasswordEl = document.getElementById('auth-password');
+const authCodeEl = document.getElementById('auth-code');
+const authSubmitEl = document.getElementById('auth-submit');
+const authErrorEl = document.getElementById('auth-error');
+const tabLoginEl = document.getElementById('tab-login');
+const tabRegisterEl = document.getElementById('tab-register');
+const userInfoEl = document.getElementById('user-info');
+const logoutEl = document.getElementById('logout');
 const sentBlockEl = document.getElementById('sent-block');
 const sentTitleEl = document.getElementById('sent-title');
 const sentTextEl = document.getElementById('sent-text');
@@ -33,14 +38,37 @@ let controller = null;
 /* ---------- 会话与本地持久化 ----------
    会话只存在浏览器本地，服务端依旧无状态。storage key 带版本号：
    将来数据结构变了就换成 v2，旧数据自然失效——不用写迁移，也不会读到旧结构而崩 */
-const STORAGE_KEY = 'ai-chat.v1';
+// 会话按用户名分开存：同一浏览器换账号时不会看到别人的对话。
+// 带版本号：结构变了就换成 v2，旧数据自然失效，不用写迁移
+const SESSIONS_KEY_PREFIX = 'ai-chat.sessions.v1.';
 
-// 访问令牌单独存一个键：它属于"本机配置"，不跟着会话走
-const TOKEN_STORAGE_KEY = 'ai-chat.token';
+// 当前用户的存储键；未登录时为空串
+function sessionsKey() {
+  return authSession ? SESSIONS_KEY_PREFIX + authSession.username : '';
+}
 
-// 读取浏览器里存的访问令牌
-function getToken() {
-  return localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+/* ---------- 登录状态 ----------
+   登录成功后服务端发放一个随机会话令牌；这里只存令牌和展示用的用户名、额度。
+   令牌是服务端唯一的凭据，可以随时被服务端删除（登出、过期） */
+const AUTH_STORAGE_KEY = 'ai-chat.auth';
+let authSession = null;  // { token, username, quota }
+
+function loadAuthSession() {
+  try {
+    const data = JSON.parse(localStorage.getItem(AUTH_STORAGE_KEY) || 'null');
+    return (data && data.token) ? data : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveAuthSession(next) {
+  authSession = next;
+  if (next) {
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(next));
+  } else {
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+  }
 }
 
 // 发给模型的上下文最多带多少条，与服务端的截断上限保持一致
@@ -65,8 +93,12 @@ function makeId() {
 
 // 把全部会话写回本地。容量超限之类的异常不能静默吞掉，否则用户以为存上了
 function saveSessions() {
+  const key = sessionsKey();
+  if (!key) {
+    return;  // 未登录不落盘
+  }
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ activeId, sessions }));
+    localStorage.setItem(key, JSON.stringify({ activeId, sessions }));
   } catch (err) {
     statusEl.textContent = '本地保存失败：' + err;
   }
@@ -74,9 +106,13 @@ function saveSessions() {
 
 // 从本地恢复会话，返回是否恢复成功
 function loadSessions() {
+  const key = sessionsKey();
+  if (!key) {
+    return false;
+  }
   let data;
   try {
-    data = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+    data = JSON.parse(localStorage.getItem(key) || 'null');
   } catch (err) {
     return false;  // 数据损坏就当没有，重新开始
   }
@@ -453,11 +489,10 @@ async function send() {
     };
     showRequestPayload(requestBody);
 
-    // 令牌放在请求头里，不出现在请求体中——所以请求体面板里也看不到它
+    // 会话令牌放在请求头里，不出现在请求体中——所以请求体面板里也看不到它
     const headers = { 'Content-Type': 'application/json' };
-    const token = getToken();
-    if (token) {
-      headers['Authorization'] = 'Bearer ' + token;
+    if (authSession) {
+      headers['Authorization'] = 'Bearer ' + authSession.token;
     }
 
     const resp = await fetch('/v1/chat/completions', {
@@ -470,10 +505,14 @@ async function send() {
     if (!resp.ok) {
       // 401 要明确说出来并且把令牌栏翻出来，否则表现是"点了发送什么都没发生"
       if (resp.status === 401) {
-        reply.content.textContent = '未授权：令牌未填写或无效，请点右上角「令牌」设置。';
+        reply.content.textContent = '登录已过期，请重新登录。';
         statusEl.textContent = '401 未授权';
-        tokenBarEl.hidden = false;
-        tokenInputEl.focus();
+        logout();
+        return;
+      }
+      if (resp.status === 403) {
+        reply.content.textContent = '额度不足，请联系管理员。';
+        statusEl.textContent = '403 额度不足';
         return;
       }
       if (resp.status === 413) {
@@ -547,6 +586,13 @@ async function send() {
     // 回灌给模型会污染后续推理，而且白烧 token
     commitTurn(sessionId, prompt, out, blocked);
 
+    // 额度以服务端为准；这里先本地扣一下让显示即时更新，刷新页面时用 /api/me 校准
+    if (out.usage && authSession) {
+      authSession.quota = Math.max(0, authSession.quota - out.usage.total_tokens);
+      saveAuthSession(authSession);
+      renderUserInfo();
+    }
+
     const total = Date.now() - startedAt;
     let summary = '完成，共 ' + total + ' ms';
     if (firstContentAt) {
@@ -579,25 +625,143 @@ payloadToggleEl.addEventListener('click', () => {
   payloadEl.hidden = !payloadEl.hidden;
 });
 
-tokenToggleEl.addEventListener('click', () => {
-  tokenBarEl.hidden = !tokenBarEl.hidden;
-  if (!tokenBarEl.hidden) {
-    tokenInputEl.focus();
-  }
-});
+/* ---------- 登录 / 注册 ---------- */
 
-tokenSaveEl.addEventListener('click', () => {
-  const token = tokenInputEl.value.trim();
-  if (!token) {
-    tokenHintEl.textContent = '令牌不能为空';
+let authMode = 'login';  // 'login' | 'register'
+
+// 显示登录遮罩，并按当前模式渲染
+function showAuth() {
+  authEl.hidden = false;
+  authErrorEl.textContent = '';
+  authCodeEl.hidden = authMode === 'login';
+  authSubmitEl.textContent = authMode === 'login' ? '登录' : '注册';
+  tabLoginEl.classList.toggle('is-active', authMode === 'login');
+  tabRegisterEl.classList.toggle('is-active', authMode === 'register');
+  authUsernameEl.focus();
+}
+
+// 顶栏显示当前用户与额度
+function renderUserInfo() {
+  userInfoEl.textContent = authSession
+    ? authSession.username + ' · 额度 ' + authSession.quota
+    : '';
+}
+
+// 从服务端刷新额度（本地只是展示，服务端才是权威值）
+async function refreshQuota() {
+  if (!authSession) {
     return;
   }
-  localStorage.setItem(TOKEN_STORAGE_KEY, token);
-  tokenHintEl.textContent = '已保存';
-  setTimeout(() => {
-    tokenHintEl.textContent = '保存在本浏览器，每次请求通过 Authorization 头发送';
-  }, 1500);
+  try {
+    const resp = await fetch('/api/me', {
+      headers: { 'Authorization': 'Bearer ' + authSession.token }
+    });
+    if (!resp.ok) {
+      return;
+    }
+    const data = await resp.json();
+    authSession.username = data.username;
+    authSession.quota = data.quota;
+    saveAuthSession(authSession);
+    renderUserInfo();
+  } catch (e) {
+    // 刷新失败不打扰用户
+  }
+}
+
+// 加载某个用户的会话列表
+function loadUserSessions() {
+  sessions = [];
+  activeId = null;
+  if (loadSessions()) {
+    renderSessionList();
+    renderSession();
+  } else {
+    newSession();
+  }
+}
+
+// 退出登录：清掉本地状态。服务端那条会话记录会在过期后自然失效
+function logout() {
+  saveAuthSession(null);
+  sessions = [];
+  activeId = null;
+  renderSessionList();
+  renderSession();
+  renderUserInfo();
+  authMode = 'login';
+  showAuth();
+}
+
+// 提交登录或注册
+async function submitAuth() {
+  const username = authUsernameEl.value.trim();
+  const password = authPasswordEl.value;
+  authErrorEl.textContent = '';
+
+  if (!username || !password) {
+    authErrorEl.textContent = '请填写用户名和密码';
+    return;
+  }
+
+  try {
+    if (authMode === 'register') {
+      const resp = await fetch('/api/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, code: authCodeEl.value.trim() })
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        authErrorEl.textContent = data.error || '注册失败';
+        return;
+      }
+      // 注册成功：切回登录，密码清空让用户重新输入
+      authMode = 'login';
+      authPasswordEl.value = '';
+      showAuth();
+      authErrorEl.textContent = '注册成功，请登录';
+      return;
+    }
+
+    const resp = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      authErrorEl.textContent = data.error || '登录失败';
+      return;
+    }
+
+    saveAuthSession({ token: data.token, username: data.username, quota: data.quota });
+    authPasswordEl.value = '';
+    authEl.hidden = true;
+    renderUserInfo();
+    loadUserSessions();
+    refreshQuota();
+  } catch (err) {
+    authErrorEl.textContent = '请求失败：' + err;
+  }
+}
+
+tabLoginEl.addEventListener('click', () => {
+  authMode = 'login';
+  showAuth();
 });
+tabRegisterEl.addEventListener('click', () => {
+  authMode = 'register';
+  showAuth();
+});
+authSubmitEl.addEventListener('click', submitAuth);
+authPasswordEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    submitAuth();
+  }
+});
+logoutEl.addEventListener('click', logout);
 
 // 代码块的「复制」按钮是渲染出来的，且流式期间会被反复重建，
 // 所以用事件委托统一处理，而不是每次渲染都去绑定
@@ -642,19 +806,18 @@ inputEl.addEventListener('keydown', (e) => {
 
 newSessionEl.addEventListener('click', newSession);
 
-// 把已保存的令牌回填到输入框
-tokenInputEl.value = getToken();
-
-// 启动：能恢复本地会话就恢复，否则开一个新的空会话
-if (loadSessions()) {
+// 启动：恢复登录状态。没有会话就显示登录遮罩，登录后再加载该用户的对话
+authSession = loadAuthSession();
+if (authSession) {
+  authEl.hidden = true;
+  renderUserInfo();
+  loadUserSessions();
+  refreshQuota();
+} else {
+  sessions = [];
+  activeId = null;
   renderSessionList();
   renderSession();
-} else {
-  newSession();
-}
-
-// 还没设过令牌就先把令牌栏打开，否则第一次发消息只会得到 401，用户不知道要做什么
-if (!getToken()) {
-  tokenBarEl.hidden = false;
+  showAuth();
 }
 inputEl.focus();

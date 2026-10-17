@@ -20,17 +20,10 @@
     <div class="topbar__actions">
       <span class="topbar__status" id="status"></span>
       <button id="payload-toggle" class="topbar__toggle" type="button">请求体</button>
-      <button id="token-toggle" class="topbar__toggle" type="button">令牌</button>
+      <span class="topbar__user" id="user-info"></span>
+      <button id="logout" class="topbar__toggle" type="button">退出</button>
     </div>
   </header>
-
-  <!-- 令牌栏：令牌只存在本浏览器，请求时通过 Authorization 头发给本服务 -->
-  <section class="token-bar" id="token-bar" hidden>
-    <input id="token-input" class="token-bar__input" type="password" autocomplete="off"
-           placeholder="粘贴 .env 里的 AI_CHAT_TOKEN" />
-    <button id="token-save" class="token-bar__save" type="button">保存</button>
-    <span class="token-bar__hint" id="token-hint">保存在本浏览器，每次请求通过 Authorization 头发送</span>
-  </section>
 
   <!-- 请求体面板：分两块显示，因为「本次发出的请求」和「累积的上下文」不是一回事 -->
   <section class="payload" id="payload" hidden>
@@ -61,6 +54,23 @@
     </div>
     <div class="composer__hint">Enter 发送，Shift + Enter 换行</div>
   </footer>
+  </div>
+
+  <!-- 登录 / 注册遮罩：没有会话时盖住整个页面 -->
+  <div class="auth" id="auth" hidden>
+    <div class="auth__box">
+      <h2 class="auth__title">ai-chat</h2>
+      <div class="auth__tabs">
+        <button id="tab-login" class="auth__tab is-active" type="button">登录</button>
+        <button id="tab-register" class="auth__tab" type="button">注册</button>
+      </div>
+      <input id="auth-username" class="auth__input" placeholder="用户名" autocomplete="username" />
+      <input id="auth-password" class="auth__input" type="password" placeholder="密码"
+             autocomplete="current-password" />
+      <input id="auth-code" class="auth__input" placeholder="邀请码" hidden />
+      <button id="auth-submit" class="auth__submit" type="button">登录</button>
+      <div id="auth-error" class="auth__error"></div>
+    </div>
   </div>
 
   <script src="markdown.js"></script>

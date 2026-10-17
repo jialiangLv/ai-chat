@@ -179,46 +179,91 @@ body {
   color: var(--text);
 }
 
-/* ---------- 令牌栏 ---------- */
-
-.token-bar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 20px;
-  border-bottom: 1px solid var(--border);
-  background: #fafafa;
-}
-
-.token-bar__input {
-  flex: 1 1 auto;
-  max-width: 420px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+.topbar__user {
+  color: var(--text-muted);
   font-size: 13px;
 }
 
-.token-bar__save {
-  padding: 6px 14px;
+/* ---------- 登录 / 注册遮罩 ---------- */
+
+.auth {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(255 255 255 / 96%);
+}
+
+.auth__box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 320px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 8px 30px rgb(0 0 0 / 8%);
+}
+
+.auth__title {
+  margin: 0 0 6px;
+  text-align: center;
+}
+
+.auth__tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.auth__tab {
+  flex: 1 1 0;
+  padding: 6px 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);
-  color: var(--text);
+  color: var(--text-muted);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   cursor: pointer;
 }
 
-.token-bar__save:hover {
-  border-color: #c9c9c9;
+.auth__tab.is-active {
+  border-color: var(--text);
+  color: var(--text);
+  font-weight: 600;
 }
 
-.token-bar__hint {
-  color: var(--text-muted);
-  font-size: 12px;
+.auth__input {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 14px;
+}
+
+.auth__submit {
+  padding: 9px 0;
+  border: none;
+  border-radius: 8px;
+  background: var(--text);
+  color: #fff;
+  font: inherit;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.auth__submit:hover {
+  background: #333;
+}
+
+.auth__error {
+  min-height: 18px;
+  color: #c0392b;
+  font-size: 13px;
+  text-align: center;
 }
 
 /* ---------- 请求体面板 ---------- */

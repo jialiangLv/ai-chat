@@ -19,3 +19,6 @@ ai-chat
 *.jsonl
 *.db
 *.log
+
+# SQLite 数据库文件
+/data/

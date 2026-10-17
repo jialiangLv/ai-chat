@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "db.h"
 #include "httplib.h"
 
 // 一条对话消息
@@ -27,7 +28,7 @@ struct Message {
 
 // 一次对话请求的最小字段，字段名对齐 OpenAI /v1/chat/completions 的子集
 struct ChatRequest {
-    std::string          model = "deepseek-flash";  // 请求指定的模型名
+    std::string          model;                     // 客户端指定的模型名；空表示未指定
     std::vector<Message> messages;                  // 完整对话，最后一条是用户本轮输入
     bool                 stream = true;             // 是否流式返回
     bool                 parse_ok = false;          // 解析是否成功
@@ -57,7 +58,8 @@ struct Usage {
 };
 
 // 调用大模型接口，把整段对话发过去并把流式返回的内容逐字回调出去，用量信息写入 usage
-bool generate_deltas(const std::vector<Message>& messages, const DeltaSink& on_delta, Usage& usage);
+bool generate_deltas(const std::string& model, const std::vector<Message>& messages,
+                     const DeltaSink& on_delta, Usage& usage);
 
-// 在 HTTP 服务上注册聊天相关路由
-void register_chat_routes(httplib::Server& server);
+// 在 HTTP 服务上注册所有路由（聊天、注册、登录、我的信息）
+void register_chat_routes(httplib::Server& server, Db& db);

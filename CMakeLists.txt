@@ -32,9 +32,12 @@ add_executable(ai_chat ${SOURCES})
 add_compile_definitions(CPPHTTPLIB_OPENSSL_SUPPORT)
 find_package(OpenSSL REQUIRED)
 
+# 用户与会话存 SQLite（单文件、有事务，不需要额外的数据库服务）
+find_package(SQLite3 REQUIRED)
+
 # cpp-httplib 依赖系统线程库，TLS 依赖 OpenSSL 的 SSL 与 Crypto 组件
 find_package(Threads REQUIRED)
-target_link_libraries(ai_chat Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(ai_chat Threads::Threads OpenSSL::SSL OpenSSL::Crypto SQLite::SQLite3)
 
 # 规范化输出路径：可执行文件统一输出到项目根目录的 bin/ 下
 set_target_properties(ai_chat PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/bin)
