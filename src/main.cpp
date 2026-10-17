@@ -77,6 +77,10 @@ int main() {
 
     httplib::Server server;
 
+    // 请求体大小上限。挡住"发个几十 MB 请求"这种最粗暴的滥用——
+    // 这和 token 估算无关，纯粹是 HTTP 层的防护，超限时返回 413
+    server.set_payload_max_length(1024 * 1024);  // 1 MB
+
     // 注册聊天相关路由（POST /v1/chat/completions）
     register_chat_routes(server);
 

@@ -476,6 +476,11 @@ async function send() {
         tokenInputEl.focus();
         return;
       }
+      if (resp.status === 413) {
+        reply.content.textContent = '请求体太大，已被服务端拒绝。请把内容拆成几段发送。';
+        statusEl.textContent = '413 请求体过大';
+        return;
+      }
       reply.content.textContent = '请求失败：HTTP ' + resp.status;
       statusEl.textContent = '';
       return;

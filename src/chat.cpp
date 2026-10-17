@@ -32,6 +32,19 @@ std::string get_env(const char* key, const std::string& default_val = "") {
     return (val && *val) ? std::string(val) : default_val;
 }
 
+// 读取整型环境变量，未设置或解析失败时用默认值——配置写错不该让请求崩掉
+long get_env_long(const char* key, long default_val) {
+    const std::string text = get_env(key);
+    if (text.empty()) {
+        return default_val;
+    }
+    try {
+        return std::stol(text);
+    } catch (const std::exception&) {
+        return default_val;
+    }
+}
+
 // 恒定时间比较：不因首个不同的字节就提前返回，避免通过响应耗时逐字节猜出令牌
 // 长度不同直接返回 false——长度本身不算秘密
 bool secure_equals(const std::string& a, const std::string& b) {
@@ -219,8 +232,10 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
         msg.content = kFiltered;
     }
 
-    // 第二步：token 估算。模型来自实测拟合，平均误差约 1 token；
-    // 但它终究只是估算——精确值只有上游返回的 usage 才有
+    // 第二步：估算整段 prompt，超限就拒绝。
+    // 估算放在敏感词清洗之后，因为真正发给模型的是清洗过的版本。
+    // 模型平均误差约 1 token，所以阈值可以设得贴近真实上限、基本不会误伤；
+    // 但它终究是估算——真正的上限只有上游知道，超长时它会返回 400
     std::vector<std::string> contents;
     contents.reserve(chat_req.messages.size());
     for (const Message& message : chat_req.messages) {
@@ -228,6 +243,20 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
     }
     TokenResult input_estimate = count_tokens(chat_req.messages.back().content);
     TokenResult prompt_estimate = estimate_conversation(contents);
+
+    const long max_prompt_tokens = get_env_long("MAX_PROMPT_TOKENS", 32000);
+    if (prompt_estimate.num_tokens > max_prompt_tokens) {
+        std::cout << "[ai-chat] prompt 估算 " << prompt_estimate.num_tokens
+                  << " 超过上限 " << max_prompt_tokens << "，已拒绝" << std::endl;
+        // 注意这里是 stream_fixed_text：它会带上 X-Ai-Chat-Blocked 标记，
+        // 前端因此不会把这一轮写进历史。否则这条超长消息会一直留在上下文里，
+        // 之后每次请求都再次超限——和敏感词那次是同一个问题
+        stream_fixed_text(res,
+                          "对话太长了（估算 " + std::to_string(prompt_estimate.num_tokens) +
+                              " token，上限 " + std::to_string(max_prompt_tokens) +
+                              "）。请新建一个对话，或删掉一些历史消息。");
+        return;
+    }
 
     std::cout << "[ai-chat] 收到请求 model=" << chat_req.model
               << " 本轮输入估算=" << input_estimate.num_tokens
