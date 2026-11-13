@@ -26,6 +26,7 @@
 
 #include "ac_automaton.h"
 #include "auth.h"
+#include "cache.h"
 #include "db.h"
 #include "json.hpp"
 #include "tokenizer.h"
@@ -168,6 +169,9 @@ void send_error(httplib::Response& res, int status, const std::string& message) 
 // 敏感词拦截时回给前端的标记响应头，前端据此决定这一轮要不要计入上下文
 constexpr const char* kBlockedHeader = "X-Ai-Chat-Blocked";
 
+// 精确缓存命中时回给前端的标记响应头，便于调试和后续统计命中率
+constexpr const char* kCacheHeader = "X-Ai-Chat-Cache";
+
 // 最多携带的消息条数（一问一答算两条），超出就丢掉最早的部分
 constexpr size_t kMaxHistoryMessages = 20;
 
@@ -194,7 +198,8 @@ void set_cors_headers(httplib::Response& res) {
     res.set_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
     res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
     // 自定义响应头默认不暴露给跨域的前端，要显式列出来，否则前端读不到它
-    res.set_header("Access-Control-Expose-Headers", kBlockedHeader);
+    res.set_header("Access-Control-Expose-Headers",
+                   std::string(kBlockedHeader) + ", " + kCacheHeader);
 }
 
 // 把单个 choices[0] 分片包装成完整的 SSE 数据行（含结尾空行）
@@ -271,6 +276,60 @@ void stream_fixed_text(httplib::Response& res, const std::string& model,
             if (!sink.write(chunk.data(), chunk.size())) {
                 return false;
             }
+            std::string done = "data: [DONE]\n\n";
+            sink.write(done.data(), done.size());
+            sink.done();
+            return true;
+        });
+}
+
+// 把缓存里的完整答案重新切成 SSE 分片回放。
+// 与 stream_fixed_text 的区别：答案可能很长，按 UTF-8 边界分块（每块 8 个字符），
+// 否则从多字节字符中间截断会让前端收到乱码
+void stream_cached_answer(httplib::Response& res, const std::string& model,
+                          const std::string& text, const Usage& usage) {
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("X-Accel-Buffering", "no");
+    res.set_header(kCacheHeader, "HIT");
+
+    res.set_chunked_content_provider(
+        "text/event-stream",
+        [text, model, usage](size_t offset, httplib::DataSink& sink) -> bool {
+            if (offset > 0) {
+                return false;
+            }
+            std::string opening = make_role_line(model);
+            if (!sink.write(opening.data(), opening.size())) {
+                return false;
+            }
+
+            size_t i = 0;
+            while (i < text.size()) {
+                size_t end = i;
+                for (int chars = 0; chars < 8 && end < text.size(); ++chars) {
+                    const unsigned char lead = static_cast<unsigned char>(text[end]);
+                    size_t width = 1;
+                    if ((lead & 0xE0) == 0xC0) {
+                        width = 2;
+                    } else if ((lead & 0xF0) == 0xE0) {
+                        width = 3;
+                    } else if ((lead & 0xF8) == 0xF0) {
+                        width = 4;
+                    }
+                    end = std::min(text.size(), end + width);
+                }
+                std::string chunk =
+                    make_delta_line(model, DeltaKind::Content, text.substr(i, end - i));
+                if (!sink.write(chunk.data(), chunk.size())) {
+                    return false;
+                }
+                i = end;
+            }
+
+            // 命中缓存完全免费，用量帧的三个计数都为 0
+            std::string usage_line = make_usage_line(model, usage);
+            sink.write(usage_line.data(), usage_line.size());
+
             std::string done = "data: [DONE]\n\n";
             sink.write(done.data(), done.size());
             sink.done();
@@ -387,6 +446,51 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
               << "，整段 prompt 估算=" << prompt_estimate.num_tokens
               << "（" << chat_req.messages.size() << " 条消息）" << std::endl;
 
+    // 精确缓存只对「自足的单轮问题」生效：带历史的追问，答案依赖前文，
+    // 复用上一次的答案就是错的。系统提示词的指纹也参与键，防止人设不同时串答案
+    const bool single_turn = chat_req.messages.size() == 1;
+    std::string normalized_question;
+    std::string prompt_hash;
+    if (single_turn) {
+        std::string system_prompt;
+        for (const Message& message : chat_req.messages) {
+            if (message.role == "system") {
+                system_prompt += message.content;
+                system_prompt.push_back('\n');
+            }
+        }
+        prompt_hash = sha256_hex(system_prompt).substr(0, 16);
+        normalized_question = normalize_question(chat_req.messages.back().content);
+    }
+
+    const long long cache_ttl = get_env_long("CACHE_TTL_SECONDS", 7 * 24 * 3600);
+    if (single_turn && !normalized_question.empty()) {
+        ExactCacheKey cache_key{g_current_user.id, model, prompt_hash,
+                                normalized_question};
+        std::string cached_answer;
+        std::string cache_error;
+        if (cache_lookup(db, cache_key, cached_answer, cache_error)) {
+            // 缓存命中完全免费：不扣额度，用量按 0 记账。
+            // 前端会根据 usage 自动扣减本地余额，所以这里必须发 0，
+            // 否则界面余额会和服务端对不上
+            Usage hit_usage;
+            hit_usage.valid = true;
+            hit_usage.prompt_tokens = 0;
+            hit_usage.completion_tokens = 0;
+            hit_usage.total_tokens = 0;
+            record_usage(db, g_current_user.id, model, 0, 0, 0, 0);
+
+            std::cout << "[ai-chat] 精确缓存命中 model=" << model
+                      << " 用户=" << g_current_user.username
+                      << " 问题=" << normalized_question << std::endl;
+            stream_cached_answer(res, model, cached_answer, hit_usage);
+            return;
+        }
+        if (!cache_error.empty()) {
+            std::cout << "[ai-chat] 缓存查询失败：" << cache_error << std::endl;
+        }
+    }
+
     // 关闭各级缓冲，否则客户端要等全部内容生成完才能看到数据
     res.set_header("Cache-Control", "no-cache");
     res.set_header("X-Accel-Buffering", "no");
@@ -395,7 +499,9 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
     res.set_chunked_content_provider(
         "text/event-stream",
         [chat_req, model, user = g_current_user, &db,
-         estimated_prompt = prompt_estimate.num_tokens](
+         estimated_prompt = prompt_estimate.num_tokens, single_turn,
+         normalized_question, prompt_hash, cache_ttl,
+         raw_question = chat_req.messages.back().content](
             size_t offset, httplib::DataSink& sink) -> bool {
             // offset 是本连接上已写出的字节数；非 0 说明是重复回调，本 provider 只跑一轮
             if (offset > 0) {
@@ -407,12 +513,18 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
                 return false;
             }
 
-            // 不再需要自己控制节奏：上游模型边生成边吐，天然就是流式的打字机效果
+            // 不再需要自己控制节奏：上游模型边生成边吐，天然就是流式的打字机效果。
+            // 同时把正式回答攒一份，等整条流结束后写进缓存
+            std::string full_answer;
             Usage usage;
             bool sent_all = generate_deltas(
                 model,
                 chat_req.messages,
-                [&sink, model](DeltaKind kind, const std::string& text) -> bool {
+                [&sink, &full_answer, model](DeltaKind kind,
+                                             const std::string& text) -> bool {
+                    if (kind == DeltaKind::Content) {
+                        full_answer += text;
+                    }
                     std::string chunk = make_delta_line(model, kind, text);
                     if (!sink.write(chunk.data(), chunk.size())) {
                         return false;
@@ -452,6 +564,29 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
                           << "（其中思考 " << usage.reasoning_tokens << "）"
                           << " 合计=" << usage.total_tokens
                           << " ｜用户=" << user.username << std::endl;
+            }
+
+            // 只有完整、正常、单轮的答案才写缓存：
+            // 客户端中途断开时 full_answer 只是半句话；错误提示也不能当答案缓存
+            const bool error_text =
+                full_answer.rfind("[连接失败]", 0) == 0 ||
+                full_answer.rfind("[上游错误]", 0) == 0 ||
+                full_answer.rfind("[配置缺失]", 0) == 0;
+            const size_t min_answer_chars = static_cast<size_t>(
+                get_env_long("CACHE_MIN_ANSWER_CHARS", 10));
+
+            if (sent_all && single_turn && !normalized_question.empty() &&
+                !error_text && full_answer.size() >= min_answer_chars) {
+                ExactCacheKey cache_key{user.id, model, prompt_hash,
+                                        normalized_question};
+                std::string cache_error;
+                if (cache_store(db, cache_key, raw_question, full_answer, cache_ttl,
+                                cache_error)) {
+                    std::cout << "[ai-chat] 已写入精确缓存 问题=" << normalized_question
+                              << std::endl;
+                } else if (!cache_error.empty()) {
+                    std::cout << "[ai-chat] 写缓存失败：" << cache_error << std::endl;
+                }
             }
 
             std::string done = "data: [DONE]\n\n";

@@ -18,6 +18,7 @@
 #include <system_error>
 
 #include "auth.h"
+#include "cache.h"
 #include "chat.h"
 #include "db.h"
 #include "httplib.h"
@@ -97,6 +98,10 @@ int main() {
     }
     if (!init_usage_schema(db, db_error)) {
         std::cerr << "[ai-chat] 建用量表失败：" << db_error << std::endl;
+        return 1;
+    }
+    if (!init_cache_schema(db, db_error)) {
+        std::cerr << "[ai-chat] 建缓存表失败：" << db_error << std::endl;
         return 1;
     }
     std::cout << "[ai-chat] 用户数据库：" << db_path << std::endl;
