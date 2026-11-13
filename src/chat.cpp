@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <exception>
 #include <iostream>
 #include <memory>
@@ -27,8 +28,12 @@
 #include "ac_automaton.h"
 #include "auth.h"
 #include "cache.h"
+#include "cache_guard.h"
 #include "db.h"
+#include "embedding.h"
 #include "json.hpp"
+#include "keyword.h"
+#include "semantic.h"
 #include "tokenizer.h"
 #include "usage.h"
 
@@ -287,10 +292,11 @@ void stream_fixed_text(httplib::Response& res, const std::string& model,
 // 与 stream_fixed_text 的区别：答案可能很长，按 UTF-8 边界分块（每块 8 个字符），
 // 否则从多字节字符中间截断会让前端收到乱码
 void stream_cached_answer(httplib::Response& res, const std::string& model,
-                          const std::string& text, const Usage& usage) {
+                          const std::string& text, const Usage& usage,
+                          const std::string& tag = "HIT") {
     res.set_header("Cache-Control", "no-cache");
     res.set_header("X-Accel-Buffering", "no");
-    res.set_header(kCacheHeader, "HIT");
+    res.set_header(kCacheHeader, tag);
 
     res.set_chunked_content_provider(
         "text/event-stream",
@@ -339,7 +345,8 @@ void stream_cached_answer(httplib::Response& res, const std::string& model,
 
 // 处理一次聊天请求：解析请求体 → 敏感词检查 → 计算输入 token → 以 SSE 逐字流式返回
 void handle_chat(const httplib::Request& req, httplib::Response& res,
-                 const AcAutomaton& sensitive, Db& db) {
+                 const AcAutomaton& sensitive, Db& db,
+                 KeywordIndex* keyword_index, SemanticIndex* semantic_index) {
     set_cors_headers(res);
 
     // 中间件已经保证登录；这里再兜一层，纯内存判断不查库
@@ -464,30 +471,82 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
     }
 
     const long long cache_ttl = get_env_long("CACHE_TTL_SECONDS", 7 * 24 * 3600);
+    ExactCacheKey cache_key{g_current_user.id, model, prompt_hash,
+                            normalized_question};
+
+    // 任意一层命中后共用：缓存命中完全免费，不扣额度，用量按 0 记账。
+    // 前端会根据 usage 自动扣减本地余额，所以这里必须发 0
+    const auto reply_from_cache = [&](const std::string& answer, const char* tag,
+                                      const char* source) {
+        Usage hit_usage;
+        hit_usage.valid = true;
+        record_usage(db, g_current_user.id, model, 0, 0, 0, 0);
+        std::cout << "[ai-chat] " << source << "命中 model=" << model
+                  << " 用户=" << g_current_user.username
+                  << " 问题=" << normalized_question << std::endl;
+        stream_cached_answer(res, model, answer, hit_usage, tag);
+    };
+
+    // 第一层：精确缓存。只对自足的单轮问题生效；系统提示词指纹也参与键
     if (single_turn && !normalized_question.empty()) {
-        ExactCacheKey cache_key{g_current_user.id, model, prompt_hash,
-                                normalized_question};
         std::string cached_answer;
         std::string cache_error;
         if (cache_lookup(db, cache_key, cached_answer, cache_error)) {
-            // 缓存命中完全免费：不扣额度，用量按 0 记账。
-            // 前端会根据 usage 自动扣减本地余额，所以这里必须发 0，
-            // 否则界面余额会和服务端对不上
-            Usage hit_usage;
-            hit_usage.valid = true;
-            hit_usage.prompt_tokens = 0;
-            hit_usage.completion_tokens = 0;
-            hit_usage.total_tokens = 0;
-            record_usage(db, g_current_user.id, model, 0, 0, 0, 0);
-
-            std::cout << "[ai-chat] 精确缓存命中 model=" << model
-                      << " 用户=" << g_current_user.username
-                      << " 问题=" << normalized_question << std::endl;
-            stream_cached_answer(res, model, cached_answer, hit_usage);
+            reply_from_cache(cached_answer, "HIT", "精确缓存");
             return;
         }
         if (!cache_error.empty()) {
             std::cout << "[ai-chat] 缓存查询失败：" << cache_error << std::endl;
+        }
+    }
+
+    // 关键词层和向量层共用同一套准入规则：
+    // 短问题、带指代、带否定的一律不进
+    const bool layered_ready =
+        single_turn && !normalized_question.empty() &&
+        cache_question_eligible(normalized_question);
+
+    // 第二层：关键词。纯本地计算，比 embedding 便宜，所以排在向量前面
+    if (layered_ready && keyword_index != nullptr) {
+        std::string keyword_answer;
+        std::string keyword_error;
+        double keyword_score = 0.0;
+        if (keyword_lookup(db, *keyword_index, cache_key, normalized_question,
+                           keyword_answer, keyword_error, keyword_score)) {
+            reply_from_cache(keyword_answer, "HIT-KEYWORD", "关键词缓存");
+            return;
+        }
+        if (!keyword_error.empty()) {
+            std::cout << "[ai-chat] 关键词缓存查询失败：" << keyword_error
+                      << std::endl;
+        }
+    }
+
+    // 第三层：语义缓存。查询向量留着，模型答完后直接用它写回
+    std::vector<float> query_vector;
+    const bool semantic_ready =
+        layered_ready && semantic_index != nullptr && embedding_configured();
+    if (semantic_ready) {
+        std::string embed_error;
+        // 用规范化后的问题做 embedding：去掉标点/空白的影响，和缓存键保持一致
+        if (!embed_question(normalized_question, query_vector, embed_error)) {
+            std::cout << "[ai-chat] embedding 失败，跳过语义缓存：" << embed_error
+                      << std::endl;
+            query_vector.clear();
+        } else {
+            std::string semantic_answer;
+            std::string semantic_error;
+            float semantic_score = 0.0f;
+            if (semantic_lookup(db, *semantic_index, cache_key, normalized_question,
+                                query_vector, semantic_answer, semantic_error,
+                                semantic_score)) {
+                reply_from_cache(semantic_answer, "HIT-SEMANTIC", "语义缓存");
+                return;
+            }
+            if (!semantic_error.empty()) {
+                std::cout << "[ai-chat] 语义缓存查询失败：" << semantic_error
+                          << std::endl;
+            }
         }
     }
 
@@ -500,7 +559,8 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
         "text/event-stream",
         [chat_req, model, user = g_current_user, &db,
          estimated_prompt = prompt_estimate.num_tokens, single_turn,
-         normalized_question, prompt_hash, cache_ttl,
+         normalized_question, prompt_hash, cache_ttl, query_vector, semantic_ready,
+         keyword_index, semantic_index,
          raw_question = chat_req.messages.back().content](
             size_t offset, httplib::DataSink& sink) -> bool {
             // offset 是本连接上已写出的字节数；非 0 说明是重复回调，本 provider 只跑一轮
@@ -584,6 +644,32 @@ void handle_chat(const httplib::Request& req, httplib::Response& res,
                                 cache_error)) {
                     std::cout << "[ai-chat] 已写入精确缓存 问题=" << normalized_question
                               << std::endl;
+
+                    long long answer_id = 0;
+                    std::string id_error;
+                    const bool have_id =
+                        cache_find_id(db, cache_key, answer_id, id_error);
+                    const long long expires_at =
+                        static_cast<long long>(std::time(nullptr)) + cache_ttl;
+
+                    // 关键词索引不依赖 embedding，所以无论向量层是否可用都要更新
+                    if (have_id && keyword_index != nullptr) {
+                        keyword_index->add(cache_key, answer_id, raw_question,
+                                           expires_at);
+                    }
+
+                    // 顺手把查询向量挂到这条答案上，供向量层下次检索
+                    if (semantic_ready && have_id && !query_vector.empty() &&
+                        semantic_index != nullptr) {
+                        std::string vector_error;
+                        if (!semantic_store(db, *semantic_index, cache_key, answer_id,
+                                            raw_question, query_vector, expires_at,
+                                            vector_error) &&
+                            !vector_error.empty()) {
+                            std::cout << "[ai-chat] 写向量失败：" << vector_error
+                                      << std::endl;
+                        }
+                    }
                 } else if (!cache_error.empty()) {
                     std::cout << "[ai-chat] 写缓存失败：" << cache_error << std::endl;
                 }
@@ -920,6 +1006,20 @@ void register_chat_routes(httplib::Server& server, Db& db) {
     // 限流器要活到服务结束，所以用 shared_ptr 按值捕获，避免悬垂引用
     auto limiter = std::make_shared<RateLimiter>();
 
+    // 关键词索引启动时从 answers 表全量加载一次，之后常驻内存
+    auto keyword_index = std::make_shared<KeywordIndex>();
+    keyword_index->load(db);
+    std::cout << "[ai-chat] 关键词缓存已启用" << std::endl;
+
+    // 向量索引启动时从 SQLite 全量加载一次，之后常驻内存
+    auto semantic_index = std::make_shared<SemanticIndex>();
+    if (embedding_configured()) {
+        semantic_index->load(db);
+        std::cout << "[ai-chat] 语义缓存已启用" << std::endl;
+    } else {
+        std::cout << "[ai-chat] 未配置 EMBEDDING_API_KEY，语义缓存关闭" << std::endl;
+    }
+
     // 鉴权中间件：在路由分发之前执行，一个地方管住所有需要登录的接口
     server.set_pre_routing_handler(
         [&db, limiter](const httplib::Request& req, httplib::Response& res) {
@@ -997,8 +1097,11 @@ void register_chat_routes(httplib::Server& server, Db& db) {
     server.Options("/api/usage", preflight);
 
     server.Post("/v1/chat/completions",
-                [sensitive, &db](const httplib::Request& req, httplib::Response& res) {
-                    handle_chat(req, res, *sensitive, db);
+                [sensitive, &db, keyword_index,
+                 semantic_index](const httplib::Request& req,
+                                 httplib::Response& res) {
+                    handle_chat(req, res, *sensitive, db, keyword_index.get(),
+                                semantic_index.get());
                 });
 
     server.Post("/api/register",

@@ -33,6 +33,10 @@ public:
     bool query_row(const std::string& sql, const std::vector<std::string>& params,
                    std::vector<std::string>& row, std::string& error);
 
+    // 查询多行；成功时 rows 为结果集（可能为空），失败返回 false
+    bool query_all(const std::string& sql, const std::vector<std::string>& params,
+                   std::vector<std::vector<std::string>>& rows, std::string& error);
+
 private:
     sqlite3* db_ = nullptr;
     std::mutex mutex_;

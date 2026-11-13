@@ -100,3 +100,38 @@ bool Db::query_row(const std::string& sql, const std::vector<std::string>& param
     sqlite3_finalize(stmt);
     return false;
 }
+
+// 查询多行；列值同样统一按文本取回
+bool Db::query_all(const std::string& sql, const std::vector<std::string>& params,
+                   std::vector<std::vector<std::string>>& rows, std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        error = sqlite3_errmsg(db_);
+        return false;
+    }
+
+    bind_params(stmt, params);
+    rows.clear();
+
+    int rc = SQLITE_ROW;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        std::vector<std::string> row;
+        const int columns = sqlite3_column_count(stmt);
+        row.reserve(columns);
+        for (int i = 0; i < columns; ++i) {
+            const unsigned char* text = sqlite3_column_text(stmt, i);
+            row.push_back(text ? reinterpret_cast<const char*>(text) : "");
+        }
+        rows.push_back(std::move(row));
+    }
+
+    if (rc != SQLITE_DONE) {
+        error = sqlite3_errmsg(db_);
+        sqlite3_finalize(stmt);
+        return false;
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}

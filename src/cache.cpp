@@ -13,6 +13,7 @@
 #include "cache.h"
 
 #include <ctime>
+#include <stdexcept>
 #include <string>
 
 #include <openssl/evp.h>
@@ -288,4 +289,20 @@ bool cache_store(Db& db, const ExactCacheKey& key, const std::string& raw_questi
          std::to_string(now), std::to_string(expires_at), exact_key_hash(key)},
         error);
     return changes >= 0;
+}
+
+bool cache_find_id(Db& db, const ExactCacheKey& key, long long& answer_id,
+                   std::string& error) {
+    std::vector<std::string> row;
+    if (!db.query_row("SELECT id FROM answers WHERE exact_hash = ?",
+                      {exact_key_hash(key)}, row, error) ||
+        row.empty()) {
+        return false;
+    }
+    try {
+        answer_id = std::stoll(row[0]);
+    } catch (const std::exception&) {
+        return false;
+    }
+    return true;
 }

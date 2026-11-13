@@ -22,6 +22,7 @@
 #include "chat.h"
 #include "db.h"
 #include "httplib.h"
+#include "semantic.h"
 #include "usage.h"
 
 // 读取环境变量，若未设置则返回预设的默认值
@@ -102,6 +103,10 @@ int main() {
     }
     if (!init_cache_schema(db, db_error)) {
         std::cerr << "[ai-chat] 建缓存表失败：" << db_error << std::endl;
+        return 1;
+    }
+    if (!init_semantic_schema(db, db_error)) {
+        std::cerr << "[ai-chat] 建向量表失败：" << db_error << std::endl;
         return 1;
     }
     std::cout << "[ai-chat] 用户数据库：" << db_path << std::endl;

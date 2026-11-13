@@ -41,3 +41,7 @@ bool cache_lookup(Db& db, const ExactCacheKey& key, std::string& answer,
 // 写入一条答案；同一个键重复写入时覆盖旧答案
 bool cache_store(Db& db, const ExactCacheKey& key, const std::string& raw_question,
                  const std::string& answer, long long ttl_seconds, std::string& error);
+
+// 取答案行 id，供关键词层、向量层引用；未找到返回 false
+bool cache_find_id(Db& db, const ExactCacheKey& key, long long& answer_id,
+                   std::string& error);
