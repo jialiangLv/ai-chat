@@ -1,6 +1,6 @@
 <mxfile host="app.diagrams.net">
   <diagram name="第 1 页" id="p3xTKcSsElBuFNeF5ZMU">
-    <mxGraphModel dx="3119" dy="795" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+    <mxGraphModel dx="2861" dy="660" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -83,27 +83,27 @@
         </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-25" edge="1" parent="1" source="nBKuV55sLwkfgb3AN4Qp-24" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;labelPadding=0 4;">
           <mxGeometry relative="1" as="geometry">
-            <mxPoint x="40" y="380" as="targetPoint" />
+            <mxPoint x="-80" y="380" as="targetPoint" />
           </mxGeometry>
         </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-24" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="请求" vertex="1">
-          <mxGeometry height="40" width="80" x="-80" y="360" as="geometry" />
+          <mxGeometry height="40" width="80" x="-200" y="360" as="geometry" />
         </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-27" edge="1" parent="1" source="nBKuV55sLwkfgb3AN4Qp-26" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;labelPadding=0 4;">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="40" y="380" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="nBKuV55sLwkfgb3AN4Qp-26" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="鉴权" vertex="1">
+          <mxGeometry height="40" width="80" x="-80" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="nBKuV55sLwkfgb3AN4Qp-29" edge="1" parent="1" source="nBKuV55sLwkfgb3AN4Qp-28" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;labelPadding=0 4;">
           <mxGeometry relative="1" as="geometry">
             <mxPoint x="160" y="380" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="nBKuV55sLwkfgb3AN4Qp-26" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="鉴权" vertex="1">
-          <mxGeometry height="40" width="80" x="40" y="360" as="geometry" />
-        </mxCell>
-        <mxCell id="nBKuV55sLwkfgb3AN4Qp-29" edge="1" parent="1" source="nBKuV55sLwkfgb3AN4Qp-28" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;labelPadding=0 4;">
-          <mxGeometry relative="1" as="geometry">
-            <mxPoint x="280" y="380" as="targetPoint" />
-          </mxGeometry>
-        </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-28" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="限流" vertex="1">
-          <mxGeometry height="40" width="80" x="160" y="360" as="geometry" />
+          <mxGeometry height="40" width="80" x="40" y="360" as="geometry" />
         </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-31" edge="1" parent="1" source="nBKuV55sLwkfgb3AN4Qp-30" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;labelPadding=0 4;">
           <mxGeometry relative="1" as="geometry">
@@ -183,6 +183,11 @@
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-46" edge="1" parent="1" source="nBKuV55sLwkfgb3AN4Qp-45" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;defaultLabelBackgroundColor=page;labelPadding=0 4;" target="nBKuV55sLwkfgb3AN4Qp-43">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
+        <mxCell id="OCJNcPbZN-8ePy2ktHIO-1" edge="1" parent="1" source="nBKuV55sLwkfgb3AN4Qp-45" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;labelPadding=0 4;">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1120" y="320" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-45" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="调大模型" vertex="1">
           <mxGeometry height="40" width="80" x="1080" y="360" as="geometry" />
         </mxCell>
@@ -202,13 +207,24 @@
           <mxGeometry height="40" width="80" x="281" y="360" as="geometry" />
         </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-58" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="限制每位用户的请求个数" vertex="1">
-          <mxGeometry height="30" width="80" x="160" y="325" as="geometry" />
+          <mxGeometry height="30" width="80" x="40" y="325" as="geometry" />
         </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-59" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="~去掉首尾空白&lt;div&gt;~全角转半角（双字节字符转单字节字符）&lt;/div&gt;&lt;div&gt;~去掉末尾标点&lt;/div&gt;" vertex="1">
           <mxGeometry height="70" width="120" x="500" y="290" as="geometry" />
         </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-61" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="规范化的问题只用于语义缓存，发给大模型的内容是规范化之前的" vertex="1">
           <mxGeometry height="50" width="110" x="510" y="410" as="geometry" />
+        </mxCell>
+        <mxCell id="OCJNcPbZN-8ePy2ktHIO-2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="流式输出给前端页面" vertex="1">
+          <mxGeometry height="40" width="80" x="1080" y="280" as="geometry" />
+        </mxCell>
+        <mxCell id="OCJNcPbZN-8ePy2ktHIO-4" edge="1" parent="1" source="OCJNcPbZN-8ePy2ktHIO-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;labelPadding=0 4;">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="280" y="380" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="OCJNcPbZN-8ePy2ktHIO-3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="检查余额" vertex="1">
+          <mxGeometry height="40" width="80" x="161" y="360" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>
