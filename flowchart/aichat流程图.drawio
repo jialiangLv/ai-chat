@@ -113,7 +113,7 @@
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-30" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="计算输入token" vertex="1">
           <mxGeometry height="40" width="80" x="400" y="360" as="geometry" />
         </mxCell>
-        <mxCell id="nBKuV55sLwkfgb3AN4Qp-32" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="1、精确匹配：hash（user_id,model,prompt_hash,规范化问题）" vertex="1">
+        <mxCell id="nBKuV55sLwkfgb3AN4Qp-32" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="1、精确匹配：hash（用SHA-256算法得出一段文字的hash指纹，相同文字得出的一串字符完全相同）" vertex="1">
           <mxGeometry height="40" width="240" x="640" y="320" as="geometry" />
         </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-40" edge="1" parent="1" source="nBKuV55sLwkfgb3AN4Qp-33" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;labelPadding=0 4;">
@@ -126,7 +126,7 @@
             <mxPoint as="offset" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="nBKuV55sLwkfgb3AN4Qp-33" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="2、关键词检索" vertex="1">
+        <mxCell id="nBKuV55sLwkfgb3AN4Qp-33" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="2、关键词检索（把一段文字切成两字一组，比较重叠的组的个数）" vertex="1">
           <mxGeometry height="40" width="240" x="640" y="360" as="geometry" />
         </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-37" edge="1" parent="1" source="nBKuV55sLwkfgb3AN4Qp-34" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;defaultLabelBackgroundColor=page;labelPadding=0 4;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="nBKuV55sLwkfgb3AN4Qp-39">
@@ -139,7 +139,7 @@
             <mxPoint as="offset" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="nBKuV55sLwkfgb3AN4Qp-34" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="3、embedding+向量检索" vertex="1">
+        <mxCell id="nBKuV55sLwkfgb3AN4Qp-34" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="3、embedding+向量检索（用一个小模型来计算一段文字的坐标，然后去向量库中寻找足够靠近的一个向量）" vertex="1">
           <mxGeometry height="40" width="240" x="640" y="400" as="geometry" />
         </mxCell>
         <mxCell id="nBKuV55sLwkfgb3AN4Qp-36" edge="1" parent="1" source="nBKuV55sLwkfgb3AN4Qp-35" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0;entryY=0.5;entryDx=0;entryDy=0;defaultLabelBackgroundColor=page;labelPadding=0 4;" target="nBKuV55sLwkfgb3AN4Qp-33">
